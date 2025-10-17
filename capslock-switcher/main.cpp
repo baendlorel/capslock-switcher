@@ -8,7 +8,7 @@ HHOOK g_hKeyboardHook = nullptr;
 NOTIFYICONDATA g_nid = {};
 const UINT WM_TRAYICON = WM_USER + 1;
 
-LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, const LPARAM lParam) {
 	if (nCode == HC_ACTION) {
 		KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
 
