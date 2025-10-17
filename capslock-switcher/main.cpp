@@ -76,8 +76,8 @@ void ShowContextMenu(const HWND hwnd) {
 	GetCursorPos(&pt);
 
 	HMENU hMenu = CreatePopupMenu();
-	wchar_t versionText[64] = {0};
-	swprintf_s(versionText, L"Version: %hs", APP_VERSION);
+	wchar_t versionText[64] = { 0 };
+	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED, 0, versionText);
 	AppendMenu(hMenu, MF_STRING, 1, L"Exit");
 
