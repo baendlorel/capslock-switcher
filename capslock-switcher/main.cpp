@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <string>
+#include "version.h"
 #include "resource.h"
 
 HINSTANCE g_hInst = nullptr;
@@ -60,7 +61,7 @@ bool AddTrayIcon(const HWND hwnd) {
 	g_nid.uID = 1;
 	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 	g_nid.uCallbackMessage = WM_TRAYICON;
-	g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+	g_nid.hIcon = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_MAINICON));
 	wcscpy_s(g_nid.szTip, L"CapsLock Switcher");
 
 	return Shell_NotifyIcon(NIM_ADD, &g_nid);
@@ -75,6 +76,9 @@ void ShowContextMenu(const HWND hwnd) {
 	GetCursorPos(&pt);
 
 	HMENU hMenu = CreatePopupMenu();
+	wchar_t versionText[64] = {0};
+	swprintf_s(versionText, L"Version: %hs", APP_VERSION);
+	AppendMenuW(hMenu, MF_STRING | MF_DISABLED, 0, versionText);
 	AppendMenu(hMenu, MF_STRING, 1, L"Exit");
 
 	SetForegroundWindow(hwnd);
