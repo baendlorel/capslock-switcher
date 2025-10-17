@@ -10,7 +10,7 @@ const UINT WM_TRAYICON = WM_USER + 1;
 
 LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, const LPARAM lParam) {
 	if (nCode == HC_ACTION) {
-		KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
+		const KBDLLHOOKSTRUCT* pKeyboard = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
 		if (pKeyboard->vkCode == VK_CAPITAL) {
 			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {

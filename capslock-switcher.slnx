@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="capslock-switcher/capslock-switcher.vcxproj" />
+  <Project Path="capslock-switcher/capslock-switcher.vcxproj" Id="0f9e43ce-9133-45e4-acc1-ea0d81fd794f" />
 </Solution>

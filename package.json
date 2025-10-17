@@ -1,0 +1,12 @@
+{
+  "name": "capslock-switcher",
+  "version": "0.0.1",
+  "description": "A simple tool to toggle Chinese and English input by Caps Lock",
+  "description_zh": "一个简单的工具，用于通过大写锁定切换中英文输入",
+  "purpose": "app",
+  "author": {
+    "name": "Kasukabe Tsumugi",
+    "email": "futami16237@gmail.com"
+  },
+  "license": "ISC"
+}
