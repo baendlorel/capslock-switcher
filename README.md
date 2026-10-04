@@ -13,7 +13,10 @@
 - ✅ 长时间运行自愈：键盘钩子失效后自动重装，Explorer重启后自动恢复托盘图标
 - ✅ 托盘图标创建失败时自动重试，不再直接退出
 - ✅ 托盘菜单可随时开启/关闭映射，菜单项带勾选状态
-- ✅ 每次切换在屏幕中央闪出当前输入法状态：中文显示"中"，英文显示"En"
+- ✅ 每次切换在屏幕中央闪出当前输入法状态：中文红底"中"，英文蓝底"En"
+- ✅ `Alt+CapsLock` 触发原本的大写锁定（同样受"启用映射"开关控制）
+- ✅ 托盘菜单可开关开机启动，以计划任务方式登录时自动运行且带管理员权限
+- ✅ 程序启动时在屏幕中央显示 `umbral-keys.png`，随后淡出
 - ✅ 出错退出时把详细错误信息写入 exe 同目录的 `capslock-switcher.log`
 
 ## 使用方法
@@ -29,7 +32,15 @@
 7. 右键点击托盘图标打开菜单：
    - `启用映射 (CapsLock -> Ctrl+Space)`：勾选/取消，用来临时开关映射。
      取消后CapsLock恢复成普通大写锁定键，程序本身仍在后台运行，随时可以再勾回来
+   - `开机启动 (管理员)`：勾选/取消开机自动启动。勾选时会弹**一次** UAC 提权确认，
+     随后程序会创建一个名为 `CapsLock Switcher` 的计划任务，触发时机为"登录时"，
+     运行级别为"最高权限"——所以之后开机自启不会再弹 UAC
    - `Exit`：退出程序
+8. 想临时用一次大写锁定，按 `Alt+CapsLock` 即可（等同于原来的 CapsLock）。
+   它同样受"启用映射"开关控制：开关关掉时，单独按 CapsLock 也是普通大写锁定
+
+启动时屏幕中央会显示一次 `umbral-keys.png`（键帽图），停留约1.4秒后淡出，
+用来提示程序已经起来了。
 
 ## 编译环境
 
@@ -54,6 +65,18 @@
   前台窗口所在显示器的中央，显示约0.5秒后淡出：
   英文 `#0073FF` 蓝底 + 白色 `En`，中文 `#FF1F45` 红底 + 白色"中"，外加一圈白色细边
   （不透明显示，保证颜色和你指定的一致；淡出动画照旧）
+- `Alt+CapsLock`：钩子检测到 Alt 按下时直接放行，由系统自己完成真正的大写锁定切换，
+  因此行为和原来的 CapsLock 完全一致，也不会误触发输入法提示
+- 启动画面 `umbral-keys.png` 以 RCDATA 资源嵌进 exe（见 `capslock-switcher.rc`），
+  用 GDI+ 解码后画进一张**预乘 Alpha（PARGB）**的 DIB，再交给 `UpdateLayeredWindow`
+  ——所以它是真正的逐像素透明，键帽边缘不会出现黑框。
+  淡出就是拿同一个 DIB 反复调用 `UpdateLayeredWindow` 并逐级降低 `SourceConstantAlpha`，
+  不需要重新解码或重绘
+- 开机启动用计划任务实现（`schtasks /SC ONLOGON /RL HIGHEST`），因为"登录时以管理员身份
+  启动且不弹 UAC"只有计划任务的"最高权限"能做到，启动文件夹的快捷方式做不到。
+  创建任务本身需要管理员权限，所以菜单项会用 `ShellExecuteW(..., "runas", ...)`
+  以 `--startup-enable` / `--startup-disable` 参数重新拉起自己；这个提权副本
+  在抢互斥体之前就完成工作并退出，不创建任何窗口，结果写进日志
 - 使用Shell_NotifyIcon创建系统托盘图标
 - 使用互斥体（Mutex）防止程序重复运行
 
@@ -100,6 +123,7 @@ capslock-switcher/
 │   ├── version.h                   # 由 gen_version.mjs 生成的版本号
 │   ├── gen_version.mjs             # 从 package.json 生成 version.h
 │   ├── app.ico                     # 程序/托盘图标（16/24/32/48/256）
+│   ├── umbral-keys.png             # 启动画面（以 RCDATA 嵌进 exe）
 │   ├── capslock-switcher.rc        # 资源脚本
 │   └── capslock-switcher.vcxproj   # 项目文件
 ├── capslock-switcher.slnx          # 解决方案

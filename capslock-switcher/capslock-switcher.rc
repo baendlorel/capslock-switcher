@@ -54,6 +54,9 @@ END
 // remains consistent on all systems.
 IDI_MAINICON            ICON                    "app.ico"
 
+// Keycap PNG that greets the user for a moment when the program starts.
+IDR_SPLASH_IMAGE        RCDATA                  "umbral-keys.png"
+
 #endif    // 中文(简体，中国) resources
 /////////////////////////////////////////////////////////////////////////////
 

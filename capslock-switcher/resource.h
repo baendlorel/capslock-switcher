@@ -15,3 +15,5 @@
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
+// Splash image (embedded as RCDATA in the .rc)
+#define IDR_SPLASH_IMAGE 102

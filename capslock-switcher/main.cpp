@@ -1,15 +1,20 @@
+#define NOMINMAX
 #include <Windows.h>
 #include <imm.h>
+#include <shellapi.h>
+#include <gdiplus.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include "version.h"
 #include "resource.h"
 
-// Needed for ImmGetDefaultIMEWnd, which tells us whether the foreground IME ended
-// up in Chinese or English mode. Declared here so the project file needs no edit.
+// imm32 for the IME state query, gdiplus for decoding the splash PNG. Declared
+// here so the project file needs no edit.
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 namespace {
 
@@ -39,12 +44,15 @@ constexpr UINT WM_SWITCH_IME = WM_APP + 2;
 
 // Tray menu command ids.
 constexpr UINT kMenuIdToggleMapping = 1;
-constexpr UINT kMenuIdExit = 2;
+constexpr UINT kMenuIdToggleStartup = 2;
+constexpr UINT kMenuIdExit = 3;
 
 constexpr UINT_PTR kTimerRetryStartup = 1;
 constexpr UINT_PTR kTimerSelfHeal = 2;
 constexpr UINT_PTR kTimerShowImeState = 3;
 constexpr UINT_PTR kTimerOverlayFade = 4;
+constexpr UINT_PTR kTimerSplashFade = 5;
+constexpr UINT_PTR kTimerRefreshStartup = 6;
 
 constexpr UINT kRetryStartupMs = 2000;
 
@@ -75,6 +83,24 @@ constexpr COLORREF kOverlayEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
 constexpr COLORREF kOverlayChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
 constexpr COLORREF kOverlayFrameColor = RGB(0xFF, 0xFF, 0xFF);
 
+// Startup splash: the keycap image, held for a moment and then faded out. It needs
+// its own window because it has per-pixel alpha, which rules out the single
+// window-wide alpha the overlay uses.
+constexpr wchar_t kSplashClass[] = L"CapsLockSwitcherSplash";
+constexpr int kSplashAlphaMax = 255;
+constexpr int kSplashFadeStep = 6;  // alpha units per tick
+constexpr UINT kSplashHoldMs = 1400;
+constexpr UINT kSplashFadeStepMs = 16;
+constexpr int kSplashMaxHeightPercent = 30;  // of the work area height; never upscaled
+
+// Autostart: a logon task that the task scheduler runs with highest privileges, so
+// logging on does not raise a UAC prompt. Creating it does need administrator
+// rights, which is why the toggle re-launches this program elevated.
+constexpr wchar_t kStartupTaskName[] = L"CapsLock Switcher";
+constexpr wchar_t kCommandStartupEnable[] = L"--startup-enable";
+constexpr wchar_t kCommandStartupDisable[] = L"--startup-disable";
+constexpr UINT kStartupRefreshDelayMs = 3000;
+
 // IMC_GETCONVERSIONMODE, sent to the IME window through WM_IME_CONTROL. It is the
 // GET counterpart of IMC_SETCONVERSIONMODE (0x0002), which immdev.h documents;
 // imm.h does not declare the GET form.
@@ -104,6 +130,22 @@ UINT g_overlayHoldTicks = 0;
 // Last state we actually managed to read, so a failed query reuses it instead of
 // flashing a wrong answer.
 bool g_lastImeWasChinese = false;
+
+// Startup splash window and the premultiplied ARGB surface it draws.
+HWND g_splashWnd = nullptr;
+HBITMAP g_splashBitmap = nullptr;
+HDC g_splashMemDc = nullptr;
+int g_splashWidth = 0;
+int g_splashHeight = 0;
+int g_splashAlpha = 0;
+UINT g_splashHoldTicks = 0;
+
+// Cached answer to "is the logon task installed?", refreshed at startup, after a
+// change, and on the slow self-heal tick.
+bool g_startupTaskInstalled = false;
+
+ULONG_PTR g_gdiplusToken = 0;
+bool g_gdiplusReady = false;
 
 wchar_t g_exePath[1024] = {};
 wchar_t g_logPath[1024] = {};
@@ -286,6 +328,14 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 		// With the switch off, CapsLock falls through to the next hook and behaves
 		// like an ordinary CapsLock - no need to uninstall anything.
 		if (g_enabled && pKeyboard->vkCode == VK_CAPITAL) {
+			// Alt+CapsLock is the way back to the original key: let the event travel
+			// on untouched so the system performs the real lock toggle itself. No
+			// overlay here either, because nothing was switched.
+			if ((GetAsyncKeyState(VK_LMENU) & 0x8000) != 0 ||
+			    (GetAsyncKeyState(VK_RMENU) & 0x8000) != 0) {
+				return CallNextHookEx(g_hKeyboardHook, nCode, wParam, lParam);
+			}
+
 			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
 				// This callback must return as fast as possible. Injecting the
 				// combination right here used to be the reason CapsLock eventually
@@ -389,6 +439,138 @@ void SetMappingEnabled(const bool enabled) {
 	g_enabled = enabled;
 	UpdateTrayTooltip();
 	ShowBalloon(enabled ? L"CapsLock \u6620\u5C04\u5DF2\u542F\u7528" : L"CapsLock \u6620\u5C04\u5DF2\u7981\u7528");
+}
+
+// ---------------------------------------------------------------------------
+// Autostart
+//
+// "Start at logon, with administrator rights, without a UAC prompt" is exactly a
+// scheduled task with the highest run level - a shortcut in the Startup folder
+// could not do the elevated part. Creating that task needs administrator rights
+// itself, so the menu item re-launches this program through the UAC prompt with a
+// switch that tells it to do just this job and exit.
+// ---------------------------------------------------------------------------
+
+bool IsProcessElevated() {
+	HANDLE token = nullptr;
+	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == FALSE) {
+		return false;
+	}
+	TOKEN_ELEVATION elevation = {};
+	DWORD returned = 0;
+	const bool ok = GetTokenInformation(token, TokenElevation, &elevation,
+	                                    sizeof(elevation), &returned) != FALSE;
+	CloseHandle(token);
+	return ok && elevation.TokenIsElevated != 0;
+}
+
+// Runs a command line and returns its exit code (-1 when it could not be started).
+// The output is discarded on purpose: only the exit status matters, which keeps
+// this independent of the display language.
+DWORD RunAndWait(const wchar_t* commandLine) {
+	wchar_t mutableLine[2048] = {};
+	wcscpy_s(mutableLine, commandLine);
+
+	STARTUPINFOW startup = {};
+	startup.cb = sizeof(startup);
+	PROCESS_INFORMATION process = {};
+
+	if (CreateProcessW(nullptr, mutableLine, nullptr, nullptr, FALSE,
+	                   CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) == FALSE) {
+		return static_cast<DWORD>(-1);
+	}
+
+	DWORD exitCode = static_cast<DWORD>(-1);
+	WaitForSingleObject(process.hProcess, 20000);
+	GetExitCodeProcess(process.hProcess, &exitCode);
+	CloseHandle(process.hProcess);
+	CloseHandle(process.hThread);
+	return exitCode;
+}
+
+const wchar_t* SchtasksPath() {
+	static wchar_t path[MAX_PATH] = {};
+	if (path[0] == L'\0') {
+		wchar_t windows[MAX_PATH] = {};
+		if (GetWindowsDirectoryW(windows, MAX_PATH) != 0) {
+			swprintf_s(path, L"%s\\System32\\schtasks.exe", windows);
+			if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+				wcscpy_s(path, L"schtasks.exe");  // fall back to the PATH
+			}
+		} else {
+			wcscpy_s(path, L"schtasks.exe");
+		}
+	}
+	return path;
+}
+
+// schtasks reports "exit code 0 == the task exists" whatever the display language,
+// and querying needs no elevation.
+bool QueryStartupTask() {
+	wchar_t command[1024] = {};
+	swprintf_s(command, L"\"%s\" /Query /TN \"%s\"", SchtasksPath(), kStartupTaskName);
+	return RunAndWait(command) == 0;
+}
+
+bool InstallStartupTask() {
+	wchar_t command[2048] = {};
+	// /RL HIGHEST is what makes the scheduler start it elevated, so logging on stays
+	// prompt-free.
+	swprintf_s(command,
+	           L"\"%s\" /Create /TN \"%s\" /TR \"\\\"%s\\\"\" /SC ONLOGON /RL HIGHEST /F",
+	           SchtasksPath(), kStartupTaskName, g_exePath);
+	const DWORD code = RunAndWait(command);
+	Log(L"startup task create: schtasks exit code %lu for \"%s\"", code, g_exePath);
+	return code == 0;
+}
+
+bool RemoveStartupTask() {
+	wchar_t command[1024] = {};
+	swprintf_s(command, L"\"%s\" /Delete /TN \"%s\" /F", SchtasksPath(), kStartupTaskName);
+	const DWORD code = RunAndWait(command);
+	Log(L"startup task delete: schtasks exit code %lu", code);
+	return code == 0;
+}
+
+void SetStartupEnabled(const bool enable) {
+	if (IsProcessElevated()) {
+		const bool ok = enable ? InstallStartupTask() : RemoveStartupTask();
+		g_startupTaskInstalled = ok && enable;
+		if (ok) {
+			ShowBalloon(enable ? L"\u5DF2\u5F00\u542F\u5F00\u673A\u542F\u52A8"
+			                   : L"\u5DF2\u5173\u95ED\u5F00\u673A\u542F\u52A8");
+		} else {
+			ShowBalloon(L"\u5F00\u673A\u542F\u52A8\u8BBE\u7F6E\u5931\u8D25\uFF0C\u8BE6\u89C1\u65E5\u5FD7");
+		}
+		return;
+	}
+
+	// Not elevated, so hand the job to an elevated copy of ourselves. That is the
+	// UAC prompt the administrator requirement implies.
+	const HINSTANCE launched = ShellExecuteW(nullptr, L"runas", g_exePath,
+	                                        enable ? kCommandStartupEnable : kCommandStartupDisable,
+	                                        nullptr, SW_HIDE);
+	if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+		Log(L"elevation refused or failed (ShellExecuteW returned %lld)",
+		    static_cast<long long>(reinterpret_cast<INT_PTR>(launched)));
+		ShowBalloon(L"\u9700\u8981\u7BA1\u7406\u5458\u6743\u9650");
+		return;
+	}
+
+	// The helper runs asynchronously, so look at the state again shortly.
+	SetTimer(g_hWnd, kTimerRefreshStartup, kStartupRefreshDelayMs, nullptr);
+}
+
+// The elevated helper: do the job, then leave without ever creating a window.
+int RunStartupHelper(const bool enable) {
+	g_startTick = GetTickCount64();
+	BuildPaths();
+
+	if (!IsProcessElevated()) {
+		Log(L"startup helper started without administrator rights; refusing");
+		return 1;
+	}
+	return (enable ? InstallStartupTask() : RemoveStartupTask()) ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +797,182 @@ void SelfHeal(const HWND hwnd) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Startup splash
+//
+// The keycap image has real transparency, so it cannot use the overlay window:
+// that one applies a single alpha to the whole window. UpdateLayeredWindow takes a
+// premultiplied ARGB surface instead, which is why this has its own window and its
+// own DIB. Fading then means re-uploading the same surface with a smaller constant
+// alpha, which costs no re-decoding.
+// ---------------------------------------------------------------------------
+
+void ReleaseSplash() {
+	if (g_splashMemDc != nullptr) {
+		DeleteDC(g_splashMemDc);
+		g_splashMemDc = nullptr;
+	}
+	if (g_splashBitmap != nullptr) {
+		DeleteObject(g_splashBitmap);
+		g_splashBitmap = nullptr;
+	}
+}
+
+bool PrepareSplash() {
+	const HRSRC resource = FindResourceW(g_hInst, MAKEINTRESOURCEW(IDR_SPLASH_IMAGE), RT_RCDATA);
+	if (resource == nullptr) {
+		Log(L"splash: embedded PNG resource not found");
+		return false;
+	}
+	const DWORD size = SizeofResource(g_hInst, resource);
+	const HGLOBAL loaded = LoadResource(g_hInst, resource);
+	const void* bytes = loaded != nullptr ? LockResource(loaded) : nullptr;
+	if (bytes == nullptr || size == 0) {
+		Log(L"splash: could not read the embedded PNG");
+		return false;
+	}
+
+	HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+	if (copy == nullptr) {
+		return false;
+	}
+	void* destination = GlobalLock(copy);
+	if (destination == nullptr) {
+		GlobalFree(copy);
+		return false;
+	}
+	memcpy(destination, bytes, size);
+	GlobalUnlock(copy);
+
+	IStream* stream = nullptr;
+	if (CreateStreamOnHGlobal(copy, TRUE, &stream) != S_OK) {
+		GlobalFree(copy);
+		return false;
+	}
+
+	Gdiplus::Image* image = Gdiplus::Image::FromStream(stream);
+	stream->Release();
+	if (image == nullptr) {
+		return false;
+	}
+	if (image->GetLastStatus() != Gdiplus::Ok) {
+		Log(L"splash: GDI+ could not decode the PNG");
+		delete image;
+		return false;
+	}
+
+	// Fit the work area, but never enlarge: the source is already big enough and
+	// scaling it up would only blur it.
+	RECT area = {};
+	SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
+	const int maxHeight = MulDiv(area.bottom - area.top, kSplashMaxHeightPercent, 100);
+
+	int width = static_cast<int>(image->GetWidth());
+	int height = static_cast<int>(image->GetHeight());
+	if (maxHeight > 0 && height > maxHeight) {
+		width = MulDiv(width, maxHeight, height);
+		height = maxHeight;
+	}
+
+	BITMAPINFO info = {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;  // top-down, matching the DIB layout GDI+ writes
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	info.bmiHeader.biCompression = BI_RGB;
+
+	void* bits = nullptr;
+	g_splashBitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+	if (g_splashBitmap == nullptr || bits == nullptr) {
+		delete image;
+		return false;
+	}
+
+	{
+		// Drawing into a PARGB bitmap makes GDI+ premultiply as it writes, which is
+		// exactly the format UpdateLayeredWindow wants.
+		Gdiplus::Bitmap target(width, height, width * 4, PixelFormat32bppPARGB,
+		                       static_cast<BYTE*>(bits));
+		Gdiplus::Graphics canvas(&target);
+		canvas.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+		canvas.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+		canvas.DrawImage(image, Gdiplus::Rect(0, 0, width, height), 0, 0,
+		                 static_cast<INT>(image->GetWidth()),
+		                 static_cast<INT>(image->GetHeight()),
+		                 Gdiplus::UnitPixel);
+	}
+	delete image;
+
+	g_splashMemDc = CreateCompatibleDC(nullptr);
+	if (g_splashMemDc == nullptr) {
+		ReleaseSplash();
+		return false;
+	}
+	SelectObject(g_splashMemDc, g_splashBitmap);
+
+	g_splashWidth = width;
+	g_splashHeight = height;
+	return true;
+}
+
+bool ApplySplashAlpha() {
+	if (g_splashWnd == nullptr || g_splashMemDc == nullptr) {
+		return false;
+	}
+
+	RECT area = {};
+	SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
+	POINT destination = {};
+	destination.x = area.left + ((area.right - area.left) - g_splashWidth) / 2;
+	destination.y = area.top + ((area.bottom - area.top) - g_splashHeight) / 2;
+	SIZE size = { g_splashWidth, g_splashHeight };
+	POINT source = { 0, 0 };
+
+	BLENDFUNCTION blend = {};
+	blend.BlendOp = AC_SRC_OVER;
+	blend.SourceConstantAlpha = static_cast<BYTE>(g_splashAlpha);
+	blend.AlphaFormat = AC_SRC_ALPHA;
+
+	if (UpdateLayeredWindow(g_splashWnd, nullptr, &destination, &size, g_splashMemDc,
+	                        &source, 0, &blend, ULW_ALPHA) == FALSE) {
+		Log(L"splash: UpdateLayeredWindow failed (%lu)", GetLastError());
+		return false;
+	}
+	return true;
+}
+
+void ShowSplash() {
+	if (g_splashWnd == nullptr || g_splashWidth == 0) {
+		return;
+	}
+	g_splashAlpha = kSplashAlphaMax;
+	if (!ApplySplashAlpha()) {
+		return;
+	}
+	ShowWindow(g_splashWnd, SW_SHOWNA);  // visible, but never taking the focus
+	g_splashHoldTicks = kSplashHoldMs / kSplashFadeStepMs;
+	SetTimer(g_hWnd, kTimerSplashFade, kSplashFadeStepMs, nullptr);
+}
+
+LRESULT CALLBACK SplashProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) {
+	// The surface is pushed with UpdateLayeredWindow, so there is nothing to paint.
+	return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+void CreateSplashWindow(const HINSTANCE instance) {
+	WNDCLASSEX wcex = {};
+	wcex.cbSize = sizeof(WNDCLASSEX);
+	wcex.lpfnWndProc = SplashProc;
+	wcex.hInstance = instance;
+	wcex.lpszClassName = kSplashClass;
+	RegisterClassExW(&wcex);
+
+	g_splashWnd = CreateWindowExW(
+	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+	    kSplashClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+}
+
 void ShowContextMenu(const HWND hwnd) {
 	POINT pt;
 	GetCursorPos(&pt);
@@ -627,11 +985,16 @@ void ShowContextMenu(const HWND hwnd) {
 	wchar_t versionText[64] = {};
 	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, versionText);
+	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0,
+	            L"Alt+CapsLock = \u539F\u6765\u7684 CapsLock");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-	// The tick is rebuilt from g_enabled every time the menu opens, so the menu
-	// can never disagree with the actual state.
+	// Both ticks are rebuilt every time the menu opens, so the menu can never
+	// disagree with the actual state.
 	AppendMenuW(hMenu, MF_STRING | (g_enabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdToggleMapping,
 	            L"\u542F\u7528\u6620\u5C04 (CapsLock -> Ctrl+Space)");
+	AppendMenuW(hMenu, MF_STRING | (g_startupTaskInstalled ? MF_CHECKED : MF_UNCHECKED),
+	            kMenuIdToggleStartup, L"\u5F00\u673A\u542F\u52A8 (\u7BA1\u7406\u5458)");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hMenu, MF_STRING, kMenuIdExit, L"Exit");
 
 	SetForegroundWindow(hwnd);
@@ -645,6 +1008,8 @@ void ShowContextMenu(const HWND hwnd) {
 
 	if (cmd == kMenuIdToggleMapping) {
 		SetMappingEnabled(!g_enabled);
+	} else if (cmd == kMenuIdToggleStartup) {
+		SetStartupEnabled(!g_startupTaskInstalled);
 	} else if (cmd == kMenuIdExit) {
 		PostMessageW(hwnd, WM_CLOSE, 0, 0);
 	}
@@ -655,8 +1020,17 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 	case WM_CREATE:
 		g_hWnd = hwnd;  // the hook callback posts to this window
 		CreateOverlayWindow(g_hInst);
+		CreateSplashWindow(g_hInst);
 		EnsureInstalled(hwnd);
 		SetTimer(hwnd, kTimerSelfHeal, kSelfHealMs, nullptr);
+
+		// Ask once whether the logon task is there; the answer is what the menu
+		// shows as the tick next to "start at logon".
+		g_startupTaskInstalled = QueryStartupTask();
+
+		if (g_gdiplusReady && PrepareSplash()) {
+			ShowSplash();
+		}
 		break;
 
 	case WM_TIMER:
@@ -683,6 +1057,25 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 					                           static_cast<BYTE>(g_overlayAlpha), LWA_ALPHA);
 				}
 			}
+		} else if (wParam == kTimerSplashFade) {
+			if (g_splashHoldTicks > 0) {
+				--g_splashHoldTicks;
+			} else {
+				g_splashAlpha -= kSplashFadeStep;
+				if (g_splashAlpha <= 0) {
+					KillTimer(hwnd, kTimerSplashFade);
+					if (g_splashWnd != nullptr) {
+						ShowWindow(g_splashWnd, SW_HIDE);
+					}
+				} else {
+					ApplySplashAlpha();
+				}
+			}
+		} else if (wParam == kTimerRefreshStartup) {
+			// A moment has passed since asking for the change, so pick up what the
+			// elevated helper did.
+			KillTimer(hwnd, kTimerRefreshStartup);
+			g_startupTaskInstalled = QueryStartupTask();
 		}
 		break;
 
@@ -704,10 +1097,17 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		KillTimer(hwnd, kTimerSelfHeal);
 		KillTimer(hwnd, kTimerShowImeState);
 		KillTimer(hwnd, kTimerOverlayFade);
+		KillTimer(hwnd, kTimerSplashFade);
+		KillTimer(hwnd, kTimerRefreshStartup);
 		if (g_overlayWnd != nullptr) {
 			DestroyWindow(g_overlayWnd);
 			g_overlayWnd = nullptr;
 		}
+		if (g_splashWnd != nullptr) {
+			DestroyWindow(g_splashWnd);
+			g_splashWnd = nullptr;
+		}
+		ReleaseSplash();
 		UninstallHook();
 		RemoveTrayIcon();
 		g_hWnd = nullptr;
@@ -742,11 +1142,27 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
-	UNREFERENCED_PARAMETER(lpCmdLine);
 	UNREFERENCED_PARAMETER(nCmdShow);
+
+	// The elevated helper must act before anything else: it has to stay clear of the
+	// running instance's single-instance mutex, and it never shows a window. These
+	// spellings must match kCommandStartupEnable / kCommandStartupDisable.
+	if (lpCmdLine != nullptr) {
+		if (strstr(lpCmdLine, "--startup-enable") != nullptr) {
+			return RunStartupHelper(true);
+		}
+		if (strstr(lpCmdLine, "--startup-disable") != nullptr) {
+			return RunStartupHelper(false);
+		}
+	}
 
 	g_startTick = GetTickCount64();
 	BuildPaths();
+
+	Gdiplus::GdiplusStartupInput gdiplusInput;
+	if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusInput, nullptr) == Gdiplus::Ok) {
+		g_gdiplusReady = true;
+	}
 
 	g_hInst = hInstance;
 
@@ -849,6 +1265,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	if (hMutex != nullptr) {
 		ReleaseMutex(hMutex);
 		CloseHandle(hMutex);
+	}
+
+	// After every GDI+ object is gone.
+	if (g_gdiplusReady) {
+		Gdiplus::GdiplusShutdown(g_gdiplusToken);
+		g_gdiplusReady = false;
 	}
 
 	return result == -1 ? 1 : static_cast<int>(msg.wParam);
