@@ -18,8 +18,15 @@ constexpr wchar_t kWindowTitle[] = L"CapsLock Switcher";
 constexpr wchar_t kMutexName[] = L"CapsLockSwitcherMutex";
 constexpr wchar_t kOverlayClass[] = L"CapsLockSwitcherOverlay";
 
-constexpr wchar_t kTooltipOn[] = L"CapsLock Switcher - 已启用";
-constexpr wchar_t kTooltipOff[] = L"CapsLock Switcher - 已禁用";
+// Non-English text below is written as \u escapes on purpose: this file is kept pure
+// ASCII so the compiler never has to guess a source code page. A BOM-less UTF-8 file
+// is decoded as the system code page, and a multi-byte character then swallows the
+// closing quote of the literal it sits in. For reference, in order of appearance:
+//   \u5DF2\u542F\u7528 = "enabled", \u5DF2\u7981\u7528 = "disabled",
+//   \u6620\u5C04 = "mapping", \u542F\u7528 = "enable",
+//   \u4E2D = the Chinese glyph the overlay shows.
+constexpr wchar_t kTooltipOn[] = L"CapsLock Switcher - \u5DF2\u542F\u7528";
+constexpr wchar_t kTooltipOff[] = L"CapsLock Switcher - \u5DF2\u7981\u7528";
 
 // Registered (system-wide) message, so a second launch can talk to the instance
 // that already owns the mutex.
@@ -55,11 +62,23 @@ constexpr UINT kImeQueryDelayMs = 50;
 // Overlay: shown centred, held, then faded out. Sizes are in DIPs and get scaled.
 constexpr int kOverlaySizeDip = 132;
 constexpr int kOverlayTextDip = 62;
-constexpr int kOverlayAlpha = 235;
+// Fully opaque so the two state colours show up exactly as specified; the fade-out
+// still animates this value down from here.
+constexpr int kOverlayAlpha = 255;
 constexpr int kOverlayFadeStep = 22;
 constexpr UINT kOverlayHoldMs = 500;
 constexpr UINT kOverlayFadeStepMs = 16;
 constexpr wchar_t kOverlayFontFace[] = L"Microsoft YaHei UI";
+
+// Overlay colours: blue while the IME is English, red while it is Chinese.
+constexpr COLORREF kOverlayEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
+constexpr COLORREF kOverlayChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
+constexpr COLORREF kOverlayFrameColor = RGB(0xFF, 0xFF, 0xFF);
+
+// IMC_GETCONVERSIONMODE, sent to the IME window through WM_IME_CONTROL. It is the
+// GET counterpart of IMC_SETCONVERSIONMODE (0x0002), which immdev.h documents;
+// imm.h does not declare the GET form.
+constexpr WPARAM kImeGetConversionMode = 0x0001;
 
 HINSTANCE g_hInst = nullptr;
 HWND g_hWnd = nullptr;
@@ -75,9 +94,16 @@ bool g_enabled = true;
 
 HWND g_overlayWnd = nullptr;
 wchar_t g_overlayText[8] = {};
+// Which of the two states the overlay is currently showing, so WM_PAINT can pick
+// the matching background colour.
+bool g_overlayChinese = false;
 int g_overlayAlpha = 0;
 int g_overlayTextHeight = kOverlayTextDip;
 UINT g_overlayHoldTicks = 0;
+
+// Last state we actually managed to read, so a failed query reuses it instead of
+// flashing a wrong answer.
+bool g_lastImeWasChinese = false;
 
 wchar_t g_exePath[1024] = {};
 wchar_t g_logPath[1024] = {};
@@ -362,7 +388,7 @@ void UpdateTrayTooltip() {
 void SetMappingEnabled(const bool enabled) {
 	g_enabled = enabled;
 	UpdateTrayTooltip();
-	ShowBalloon(enabled ? L"CapsLock 映射已启用" : L"CapsLock 映射已禁用");
+	ShowBalloon(enabled ? L"CapsLock \u6620\u5C04\u5DF2\u542F\u7528" : L"CapsLock \u6620\u5C04\u5DF2\u7981\u7528");
 }
 
 // ---------------------------------------------------------------------------
@@ -370,33 +396,36 @@ void SetMappingEnabled(const bool enabled) {
 // ---------------------------------------------------------------------------
 
 // True when the foreground window's IME sits in a native (Chinese) input mode.
-// Falls back to false - "English" being the harmless answer - whenever the state
-// cannot be read.
 bool ForegroundImeIsChinese() {
 	const HWND foreground = GetForegroundWindow();
 	if (foreground == nullptr) {
-		return false;
+		return g_lastImeWasChinese;
 	}
 
-	// Ask the window the user is typing into for its input context. This works
-	// across process boundaries, which is the whole point here: that window
-	// belongs to somebody else.
-	const HIMC context = ImmGetContext(foreground);
-	if (context == nullptr) {
-		return false;  // no IME attached to it, so there is nothing Chinese about it
+	// Do NOT use ImmGetContext here. An IME context belongs to a thread's input
+	// queue, so for a window owned by another thread - which is every window this
+	// program ever inspects - it simply returns NULL, and every answer would come
+	// out "English". The IME window answers across process boundaries instead.
+	const HWND imeWnd = ImmGetDefaultIMEWnd(foreground);
+	if (imeWnd == nullptr) {
+		return g_lastImeWasChinese;
 	}
 
-	DWORD conversion = 0;
-	const bool read = ImmGetConversionStatus(context, &conversion, nullptr) != FALSE;
-	ImmReleaseContext(foreground, context);
-	if (!read) {
-		return false;
+	// kImeGetConversionMode is the GET counterpart of the IMC_SETCONVERSIONMODE
+	// (0x0002) that immdev.h documents. It carries no pointer, so sending it into
+	// another process is safe, and the timeout keeps a wedged target from stalling
+	// the message loop.
+	DWORD_PTR conversion = 0;
+	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
+	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 150, &conversion) == 0) {
+		return g_lastImeWasChinese;
 	}
 
 	// IME_CMODE_NATIVE is the bit Chinese, Japanese and Korean IMEs set while they
-	// are in their native (non-alphanumeric) input mode. With the IME switched to
-	// English it is clear, and a layout without an IME has no context at all.
-	return (conversion & IME_CMODE_NATIVE) != 0;
+	// are in their native (non-alphanumeric) input mode; switching the IME to
+	// English clears it (the mode becomes plain 0x0, or 0x401 while Chinese).
+	g_lastImeWasChinese = (conversion & IME_CMODE_NATIVE) != 0;
+	return g_lastImeWasChinese;
 }
 
 LRESULT CALLBACK OverlayProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) {
@@ -411,12 +440,13 @@ LRESULT CALLBACK OverlayProc(const HWND hwnd, const UINT message, const WPARAM w
 			RECT rc = {};
 			GetClientRect(hwnd, &rc);
 
-			const HBRUSH background = CreateSolidBrush(RGB(28, 28, 28));
+			const HBRUSH background = CreateSolidBrush(
+			    g_overlayChinese ? kOverlayChineseColor : kOverlayEnglishColor);
 			FillRect(dc, &rc, background);
 			DeleteObject(background);
 
-			// A thin frame keeps the block readable over any wallpaper.
-			const HBRUSH frame = CreateSolidBrush(RGB(130, 130, 130));
+			// A thin white frame keeps the block readable over any wallpaper.
+			const HBRUSH frame = CreateSolidBrush(kOverlayFrameColor);
 			FrameRect(dc, &rc, frame);
 			DeleteObject(frame);
 
@@ -472,7 +502,8 @@ void ShowImeStateOverlay() {
 		return;
 	}
 
-	wcscpy_s(g_overlayText, ForegroundImeIsChinese() ? L"中" : L"En");
+	g_overlayChinese = ForegroundImeIsChinese();
+	wcscpy_s(g_overlayText, g_overlayChinese ? L"\u4E2D" : L"En");
 
 	const HDC screen = GetDC(nullptr);
 	const int dpi = screen != nullptr ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
@@ -600,7 +631,7 @@ void ShowContextMenu(const HWND hwnd) {
 	// The tick is rebuilt from g_enabled every time the menu opens, so the menu
 	// can never disagree with the actual state.
 	AppendMenuW(hMenu, MF_STRING | (g_enabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdToggleMapping,
-	            L"启用映射 (CapsLock → Ctrl+Space)");
+	            L"\u542F\u7528\u6620\u5C04 (CapsLock -> Ctrl+Space)");
 	AppendMenuW(hMenu, MF_STRING, kMenuIdExit, L"Exit");
 
 	SetForegroundWindow(hwnd);
