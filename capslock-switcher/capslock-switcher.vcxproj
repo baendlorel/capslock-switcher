@@ -152,9 +152,9 @@
     <None Include="..\package.json" />
     <None Include="gen_version.mjs" />
   </ItemGroup>
-  <!-- Run gen_version.ps1 before build -->
+  <!-- Generate the version header before build (also works in paths with spaces). -->
   <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
-    <Exec Command="node $(ProjectDir)gen_version.mjs" />
+    <Exec Command="node &quot;$(ProjectDir)gen_version.mjs&quot;" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
