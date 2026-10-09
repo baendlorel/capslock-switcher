@@ -18,9 +18,7 @@ constexpr wchar_t kTooltipOff[] = L"CapsLock Switcher - \u5DF2\u7981\u7528";
 
 // 托盘菜单命令 ID。
 constexpr UINT kMenuIdSettings = 1;
-constexpr UINT kMenuIdToggleMapping = 2;
-constexpr UINT kMenuIdToggleStartup = 3;
-constexpr UINT kMenuIdExit = 4;
+constexpr UINT kMenuIdExit = 2;
 
 NOTIFYICONDATA g_nid = {};
 
@@ -98,7 +96,12 @@ void SetMappingEnabled(const bool enabled) {
 	                    : L"CapsLock \u6620\u5C04\u5DF2\u7981\u7528");
 }
 
-// 右键菜单。每次打开都重新生成勾选状态，所以菜单永远不会和真实状态不一致。
+void SetAltCapsLockEnabled(const bool enabled) {
+	g_altPassThrough = enabled;
+	ShowBalloon(enabled ? L"Alt+CapsLock\uFF1A\u653E\u884C\u5927\u5199\u9501\u5B9A" : L"Alt+CapsLock\uFF1A\u5DF2\u5173\u95ED");
+}
+
+// 右键菜单：开关都在设置页里，这里只留版本号、打开设置和退出。
 void ShowTrayMenu(const HWND hwnd) {
 	POINT pt;
 	GetCursorPos(&pt);
@@ -111,15 +114,8 @@ void ShowTrayMenu(const HWND hwnd) {
 	wchar_t versionText[64] = {};
 	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, versionText);
-	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0,
-	            L"Alt+CapsLock = \u539F\u6765\u7684 CapsLock");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hMenu, MF_STRING, kMenuIdSettings, L"\u8BBE\u7F6E...");
-	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-	AppendMenuW(hMenu, MF_STRING | (g_enabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdToggleMapping,
-	            L"\u542F\u7528\u6620\u5C04 (CapsLock -> Ctrl+Space)");
-	AppendMenuW(hMenu, MF_STRING | (g_startupTaskInstalled ? MF_CHECKED : MF_UNCHECKED),
-	            kMenuIdToggleStartup, L"\u5F00\u673A\u542F\u52A8 (\u7BA1\u7406\u5458)");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hMenu, MF_STRING, kMenuIdExit, L"Exit");
 
@@ -134,10 +130,6 @@ void ShowTrayMenu(const HWND hwnd) {
 
 	if (cmd == kMenuIdSettings) {
 		OpenSettingsWindow();
-	} else if (cmd == kMenuIdToggleMapping) {
-		SetMappingEnabled(!g_enabled);
-	} else if (cmd == kMenuIdToggleStartup) {
-		SetStartupEnabled(!g_startupTaskInstalled);
 	} else if (cmd == kMenuIdExit) {
 		PostMessageW(hwnd, WM_CLOSE, 0, 0);
 	}

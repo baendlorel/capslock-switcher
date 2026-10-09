@@ -83,7 +83,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
 				if (!g_capsDown) {
 					g_capsDown = true;
-					g_capsPassedAsAlt = (pKeyboard->flags & LLKHF_ALTDOWN) != 0;
+					const bool alt = (pKeyboard->flags & LLKHF_ALTDOWN) != 0;
+					// Alt+CapsLock 放行给原来的大写锁定。这一条可以在托盘菜单和设置页里
+					// 关掉；关掉之后 Alt 不再特殊，Alt+CapsLock 就和 CapsLock 一样切换输入法。
+					g_capsPassedAsAlt = alt && g_altPassThrough;
 					g_capsSwallowed = g_enabled && !g_capsPassedAsAlt;
 					if (g_capsSwallowed) {
 						// 现在就把目标窗口记下来：排队中的请求不许切换到一个新应用。

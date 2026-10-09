@@ -16,8 +16,9 @@ constexpr wchar_t kSettingsTitle[] = L"CapsLock Switcher 设置";
 
 // 控件 ID。
 constexpr int kIdChkMapping = 101;
-constexpr int kIdChkStartup = 102;
-constexpr int kIdOpenLog = 103;
+constexpr int kIdChkAlt = 102;
+constexpr int kIdChkStartup = 103;
+constexpr int kIdOpenLog = 104;
 
 constexpr UINT_PTR kTimerRefresh = 1;
 constexpr UINT kRefreshMs = 1000;
@@ -32,8 +33,8 @@ constexpr ULONGLONG kStartupPendingMs = 20000;
 
 HWND g_wnd = nullptr;
 HWND g_chkMapping = nullptr;
+HWND g_chkAlt = nullptr;
 HWND g_chkStartup = nullptr;
-HWND g_hint = nullptr;
 HWND g_btnOpenLog = nullptr;
 HWND g_logView = nullptr;
 HFONT g_font = nullptr;
@@ -150,13 +151,14 @@ void CreateControls(const HWND wnd) {
 	    0, L"BUTTON", L"启用映射 (CapsLock -> Ctrl+Space)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkMapping)), g_hInst, nullptr);
+	g_chkAlt = CreateWindowExW(
+	    0, L"BUTTON", L"Alt+CapsLock = 原来的大写锁定",
+	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
+	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkAlt)), g_hInst, nullptr);
 	g_chkStartup = CreateWindowExW(
 	    0, L"BUTTON", L"开机启动 (管理员)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkStartup)), g_hInst, nullptr);
-	g_hint = CreateWindowExW(
-	    0, L"STATIC", L"想临时用一次大写锁定，按 Alt+CapsLock。",
-	    WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, wnd, nullptr, g_hInst, nullptr);
 	g_btnOpenLog = CreateWindowExW(
 	    0, L"BUTTON", L"打开日志文件",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, wnd,
@@ -185,9 +187,9 @@ void LayoutChildren(const HWND wnd) {
 	int y = margin;
 	MoveWindow(g_chkMapping, margin, y, inner, row, TRUE);
 	y += row;
+	MoveWindow(g_chkAlt, margin, y, inner, row, TRUE);
+	y += row;
 	MoveWindow(g_chkStartup, margin, y, inner, row, TRUE);
-	y += row + gap;
-	MoveWindow(g_hint, margin, y, inner, row, TRUE);
 	y += row + gap;
 	MoveWindow(g_btnOpenLog, margin, y, buttonW, buttonH, TRUE);
 	y += buttonH + gap;
@@ -198,6 +200,10 @@ void LayoutChildren(const HWND wnd) {
 void SyncControls() {
 	if (g_chkMapping != nullptr) {
 		SendMessageW(g_chkMapping, BM_SETCHECK, g_enabled.load() ? BST_CHECKED : BST_UNCHECKED, 0);
+	}
+	if (g_chkAlt != nullptr) {
+		SendMessageW(g_chkAlt, BM_SETCHECK,
+		             g_altPassThrough.load() ? BST_CHECKED : BST_UNCHECKED, 0);
 	}
 	if (g_chkStartup == nullptr) {
 		return;
@@ -271,7 +277,7 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 			return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
 		}
 		SetBkMode(dc, TRANSPARENT);
-		SetTextColor(dc, GetSysColor(control == g_hint ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT));
+		SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
 		return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
 	}
 
@@ -291,6 +297,9 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 		switch (LOWORD(wParam)) {
 		case kIdChkMapping:
 			SetMappingEnabled(SendMessageW(g_chkMapping, BM_GETCHECK, 0, 0) == BST_CHECKED);
+			return 0;
+		case kIdChkAlt:
+			SetAltCapsLockEnabled(SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED);
 			return 0;
 		case kIdChkStartup:
 			g_startupPending = true;

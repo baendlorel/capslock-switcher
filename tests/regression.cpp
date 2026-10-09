@@ -91,6 +91,7 @@ static void ResetKeyboard() {
     g_capsLockOn = false;
     g_capsPassedAsAlt = false;
     g_enabled = true;
+    g_altPassThrough = true;
     posted.clear();
     postSucceeds = true;
     ctrlHeld = spaceHeld = false;
@@ -118,6 +119,16 @@ static void TestKeyboard() {
     Check(Key(WM_KEYUP) == 0 && posted.size() == 1 &&
           posted[0].message == WM_CAPS_LOCK_PASSED && posted[0].wParam == 1 && posted[0].lParam == 1,
           "Alt CapsLock reports the flipped caps state once, on release");
+
+    // Alt+CapsLock 的放行可以关掉：关掉之后 Alt 不再特殊，和 CapsLock 一样切换输入法。
+    ResetKeyboard();
+    g_altPassThrough = false;
+    Check(Key(WM_SYSKEYDOWN, LLKHF_ALTDOWN) == 1, "pass-through off: Alt CapsLock is swallowed");
+    Check(posted.size() == 1 && posted[0].message == WM_SWITCH_IME,
+          "pass-through off: Alt CapsLock switches like plain CapsLock");
+    Check(Key(WM_SYSKEYUP, LLKHF_ALTDOWN) == 1 && posted.size() == 1,
+          "pass-through off: the swallowed pair produces no caps banner");
+    g_altPassThrough = true;
 
     ResetKeyboard();
     Key(WM_KEYDOWN);

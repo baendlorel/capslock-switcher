@@ -35,6 +35,9 @@ std::atomic_bool g_enabled{ true };
 // 缓存"登录任务装没装"的答案，启动时和每次改动之后刷新。
 bool g_startupTaskInstalled = false;
 
+// Alt+CapsLock 放行给原来的大写锁定（默认开）。
+std::atomic_bool g_altPassThrough{ true };
+
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"CapsLockSwitcherClass";

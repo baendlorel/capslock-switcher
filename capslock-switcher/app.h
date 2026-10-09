@@ -18,6 +18,10 @@ extern std::atomic_bool g_enabled;
 // 缓存"登录任务装没装"的答案，启动时和每次改动之后刷新。
 extern bool g_startupTaskInstalled;
 
+// Alt+CapsLock 是否放行给原来的大写锁定。关掉之后 Alt 不再特殊：
+// Alt+CapsLock 和 CapsLock 一样，照样切换输入法。
+extern std::atomic_bool g_altPassThrough;
+
 // 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，不要占用。
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
@@ -36,3 +40,4 @@ constexpr UINT kStartupRefreshDelayMs = 3000;
 
 void SetMappingEnabled(bool enabled);  // tray.cpp
 void SetStartupEnabled(bool enable);   // startup.cpp
+void SetAltCapsLockEnabled(bool enabled);  // tray.cpp
