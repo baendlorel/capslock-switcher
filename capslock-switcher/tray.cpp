@@ -7,6 +7,8 @@
 #include "version.h"
 
 #include <cstdio>
+#include <string>
+#include <winnls.h>
 
 bool g_trayIconAdded = false;
 
@@ -21,6 +23,26 @@ constexpr UINT kMenuIdSettings = 1;
 constexpr UINT kMenuIdExit = 2;
 
 NOTIFYICONDATA g_nid = {};
+
+std::wstring GetCurrentInputMethodName() {
+	HKL hkl = GetKeyboardLayout(0);
+	if (hkl == nullptr) {
+		return L"Unknown";
+	}
+
+	LANGID langId = LOWORD(hkl);
+	wchar_t buffer[256] = {};
+
+	if (GetLocaleInfoW(langId, LOCALE_SNATIVELANGNAME, buffer, std::size(buffer)) > 0) {
+		return buffer;
+	}
+
+	if (GetLocaleInfoW(langId, LOCALE_SLANGUAGE, buffer, std::size(buffer)) > 0) {
+		return buffer;
+	}
+
+	return L"Unknown";
+}
 
 void FillTrayData(const HWND hwnd) {
 	g_nid.cbSize = sizeof(NOTIFYICONDATA);
@@ -115,6 +137,11 @@ void ShowTrayMenu(const HWND hwnd) {
 	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, versionText);
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+	std::wstring imeText = L"\u5F53\u524D\u8F93\u5165\u6CD5\uFF1A" + GetCurrentInputMethodName();
+	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, imeText.c_str());
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
 	AppendMenuW(hMenu, MF_STRING, kMenuIdSettings, L"\u8BBE\u7F6E...");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hMenu, MF_STRING, kMenuIdExit, L"Exit");
