@@ -25,9 +25,18 @@ constexpr UINT_PTR kTimerSwitchSettle = 2;
 // 注入的 Ctrl+Space 要先被目标窗口处理掉，不然读到的还是切换前的旧状态。
 constexpr UINT kSwitchSettleMs = 50;
 
-// 中文红底、英文蓝底，文字都是白的。
-constexpr COLORREF kChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
-constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
+// 中文红底、英文蓝底、大写锁定紫底，文字都是白的。
+constexpr COLORREF kChineseColor = RGB(0xFF, 0x1F, 0x45);   // #FF1F45
+constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);   // #0073FF
+constexpr COLORREF kCapsLockColor = RGB(0x93, 0x33, 0xEA);       // #9333EA
+// 小写用淡一半的紫（就是上面那个紫往白里兑 50%），一眼能和大写区分开。
+constexpr COLORREF kCapsLockLowerColor = RGB(0xC9, 0x99, 0xF4);  // #C999F4
+
+// 横幅要显示哪一种：输入法的中/英，还是大写锁定的大写/小写。
+enum class BannerKind {
+	InputMethod,
+	CapsLock,
+};
 
 // WM_IME_CONTROL 的消息本身在 winuser.h 里；这两个常量定义在 immdev.h 里，
 // 直接写出来就不用链接 imm32 了。
@@ -42,7 +51,9 @@ int g_bannerWidth = 0;
 int g_bannerHeight = 0;
 int g_bannerAlpha = 0;
 UINT g_bannerHoldTicks = 0;
-bool g_bannerChinese = false;
+BannerKind g_bannerKind = BannerKind::InputMethod;
+// 输入法横幅：是不是中文；大写锁定横幅：是不是大写。
+bool g_bannerState = false;
 const wchar_t* g_bannerText = L"";
 // 上一次成功读到的状态：读不到时沿用，免得闪出一个错的中英文。
 bool g_lastKnownChinese = false;
@@ -86,6 +97,14 @@ bool CurrentInputIsChinese() {
 	return g_lastKnownChinese;
 }
 
+// 这次横幅该用什么底色。
+COLORREF BannerFill() {
+	if (g_bannerKind == BannerKind::CapsLock) {
+		return g_bannerState ? kCapsLockColor : kCapsLockLowerColor;
+	}
+	return g_bannerState ? kChineseColor : kEnglishColor;
+}
+
 // 一个像素被圆角矩形盖住的比例，按 4x4 子采样算。
 unsigned char RoundedRectCoverage(const int px, const int py, const Gdiplus::REAL radius) {
 	const Gdiplus::REAL right = static_cast<Gdiplus::REAL>(g_bannerWidth) - radius;
@@ -114,7 +133,7 @@ void StampRoundedAlpha(const Gdiplus::REAL radius) {
 	if (pixels == nullptr) {
 		return;
 	}
-	const COLORREF fill = g_bannerChinese ? kChineseColor : kEnglishColor;
+	const COLORREF fill = BannerFill();
 	for (int y = 0; y < g_bannerHeight; ++y) {
 		for (int x = 0; x < g_bannerWidth; ++x) {
 			const unsigned char coverage = RoundedRectCoverage(x, y, radius);
@@ -159,7 +178,7 @@ bool RenderBanner(const int width, const int height, const int dpi) {
 	if (radius > surfaceH * 0.5f) {
 		radius = surfaceH * 0.5f;
 	}
-	const COLORREF fill = g_bannerChinese ? kChineseColor : kEnglishColor;
+	const COLORREF fill = BannerFill();
 
 	// 形状走 GDI+，圆角才有抗锯齿；它的析构会把绘制刷完再让 GDI 画字。
 	{
@@ -214,8 +233,12 @@ void ShowBannerNow() {
 	if (g_bannerWnd == nullptr) {
 		return;
 	}
-	g_bannerChinese = CurrentInputIsChinese();
-	g_bannerText = g_bannerChinese ? L"中文" : L"English";
+	if (g_bannerKind == BannerKind::InputMethod) {
+		g_bannerState = CurrentInputIsChinese();
+		g_bannerText = g_bannerState ? L"中文" : L"English";
+	} else {
+		g_bannerText = g_bannerState ? L"大写" : L"小写";
+	}
 
 	const HWND foreground = GetForegroundWindow();
 	const int dpi = ScreenDpi(foreground, g_bannerWnd);
@@ -282,8 +305,21 @@ void ShowSwitchBanner() {
 	if (g_bannerWnd == nullptr) {
 		return;
 	}
+	// 这次要显示的是输入法，必须先把类型改回来：不改的话会沿用上一次
+	// （比如 Alt+CapsLock）的类型，切换中英文就只会显示"大写/小写"。
+	g_bannerKind = BannerKind::InputMethod;
 	// 等注入的快捷键先生效，再读状态。
 	SetTimer(g_bannerWnd, kTimerSwitchSettle, kSwitchSettleMs, nullptr);
+}
+
+void ShowCapsLockBanner(const bool upper) {
+	if (g_bannerWnd == nullptr) {
+		return;
+	}
+	KillTimer(g_bannerWnd, kTimerSwitchSettle);  // 排队中的输入法横幅作废：这次要显示的是大写锁定
+	g_bannerKind = BannerKind::CapsLock;
+	g_bannerState = upper;
+	ShowBannerNow();
 }
 
 void DestroyBannerWindow() {

@@ -11,7 +11,12 @@
 static bool ctrlHeld = false;
 static bool spaceHeld = false;
 static bool postSucceeds = true;
-static unsigned posted = 0;
+struct PostedMessage {
+    UINT message;
+    WPARAM wParam;
+    LPARAM lParam;
+};
+static std::vector<PostedMessage> posted;
 static UINT firstSendCount = UINT_MAX;
 static std::vector<std::vector<INPUT>> sentBatches;
 static std::atomic<DWORD> hookOwner{ 0 };
@@ -28,8 +33,8 @@ static SHORT WINAPI FakeKeyState(int key) {
         ? static_cast<SHORT>(0x8000) : 0;
 }
 static HWND WINAPI FakeForeground() { return reinterpret_cast<HWND>(1); }
-static BOOL WINAPI FakePost(HWND, UINT, WPARAM, LPARAM) {
-    ++posted;
+static BOOL WINAPI FakePost(HWND, UINT message, WPARAM wParam, LPARAM lParam) {
+    posted.push_back({ message, wParam, lParam });
     return postSucceeds;
 }
 static LRESULT WINAPI FakeNext(HHOOK, int, WPARAM, LPARAM) { return 0; }
@@ -83,8 +88,10 @@ static LRESULT Key(WPARAM message, DWORD flags = 0) {
 static void ResetKeyboard() {
     g_capsDown = false;
     g_capsSwallowed = false;
+    g_capsLockOn = false;
+    g_capsPassedAsAlt = false;
     g_enabled = true;
-    posted = 0;
+    posted.clear();
     postSucceeds = true;
     ctrlHeld = spaceHeld = false;
     firstSendCount = UINT_MAX;
@@ -97,28 +104,36 @@ static void TestKeyboard() {
     for (int i = 0; i < 40; ++i) {
         Check(Key(WM_KEYDOWN) == 1, "auto-repeat swallowed");
     }
-    Check(posted == 1, "long press switches exactly once");
+    Check(posted.size() == 1 && posted[0].message == WM_SWITCH_IME,
+          "long press switches exactly once");
     Check(Key(WM_KEYUP) == 1, "mapped CapsLock up swallowed");
     Key(WM_KEYDOWN);
     Key(WM_KEYUP);
-    Check(posted == 2, "second press switches again");
+    Check(posted.size() == 2 && posted[1].message == WM_SWITCH_IME, "second press switches again");
 
     ResetKeyboard();
-    Check(Key(WM_SYSKEYDOWN, LLKHF_ALTDOWN) == 0, "Alt CapsLock passed through");
-    Check(Key(WM_KEYDOWN) == 0, "Alt released during hold does not start mapping");
-    Check(Key(WM_KEYUP) == 0 && posted == 0, "Alt CapsLock up stays paired");
+    Check(Key(WM_SYSKEYDOWN, LLKHF_ALTDOWN) == 0 && posted.empty(),
+          "Alt CapsLock passed through");
+    Check(Key(WM_KEYDOWN) == 0 && posted.empty(), "Alt released during hold does not start mapping");
+    Check(Key(WM_KEYUP) == 0 && posted.size() == 1 &&
+          posted[0].message == WM_CAPS_LOCK_PASSED && posted[0].wParam == 1 && posted[0].lParam == 1,
+          "Alt CapsLock reports the flipped caps state once, on release");
 
     ResetKeyboard();
     Key(WM_KEYDOWN);
     g_enabled = false;
     Check(Key(WM_SYSKEYUP, LLKHF_ALTDOWN) == 1, "disable/Alt during hold preserves swallowed up");
-    Check(Key(WM_KEYDOWN) == 0, "disabled down passes through");
+    Check(Key(WM_KEYDOWN) == 0 && posted.size() == 1,
+          "disabled down passes through without a banner of its own");
     g_enabled = true;
-    Check(Key(WM_KEYUP) == 0, "enable during hold preserves passed-through up");
+    Check(Key(WM_KEYUP) == 0 && posted.size() == 2 &&
+          posted[1].message == WM_CAPS_LOCK_PASSED && posted[1].wParam == 0 && posted[1].lParam == 1,
+          "enable during hold preserves passed-through up and reports the caps state");
 
     ResetKeyboard();
     Check(Key(WM_KEYDOWN, LLKHF_INJECTED) == 0, "injected CapsLock passes through");
-    Check(Key(WM_KEYUP, LLKHF_INJECTED) == 0 && posted == 0, "injected keys do not alter physical press");
+    Check(Key(WM_KEYUP, LLKHF_INJECTED) == 0 && posted.empty() && g_capsLockOn,
+          "injected CapsLock flips the tracked caps state but posts nothing");
     postSucceeds = false;
     Check(Key(WM_KEYDOWN) == 0 && Key(WM_KEYUP) == 0, "queue failure preserves original key pair");
 
@@ -157,31 +172,62 @@ static void TestRendering() {
         Check(g_splashWidth > 0 && g_splashHeight > 0, "splash dimensions valid");
         ReleaseSplash();
     }
-    // 提示横幅：中文红底、英文蓝底，圆角必须真的透明，颜色只预乘一次。
-    for (int chinese = 0; chinese <= 1; ++chinese) {
-        g_bannerChinese = chinese != 0;
-        g_bannerText = chinese != 0 ? L"中文" : L"English";
-        const int width = 200;
-        const int height = 96;
-        Check(RenderBanner(width, height, 96), "banner renders");
+    // 提示横幅：输入法红/蓝，大写锁定紫；圆角必须真的透明，颜色只预乘一次。
+    struct BannerCase {
+        BannerKind kind;
+        bool state;
+        const wchar_t* text;
+        COLORREF fill;
+    };
+    const BannerCase cases[] = {
+        { BannerKind::InputMethod, true, L"中文", kChineseColor },
+        { BannerKind::InputMethod, false, L"English", kEnglishColor },
+        { BannerKind::CapsLock, true, L"大写", kCapsLockColor },
+        { BannerKind::CapsLock, false, L"小写", kCapsLockLowerColor },
+    };
+    const int bannerWidth = 200;
+    const int bannerHeight = 96;
+    for (const BannerCase& item : cases) {
+        g_bannerKind = item.kind;
+        g_bannerState = item.state;
+        g_bannerText = item.text;
+        Check(RenderBanner(bannerWidth, bannerHeight, 96), "banner renders");
         const auto* pixels = static_cast<const DWORD*>(g_bannerBits);
         Check(pixels[0] == 0, "banner corner is transparent");
-        Check((pixels[10 * width + width / 2] >> 24) == 255, "banner interior opaque");
-        const COLORREF color = chinese != 0 ? kChineseColor : kEnglishColor;
+        Check((pixels[10 * bannerWidth + bannerWidth / 2] >> 24) == 255, "banner interior opaque");
         bool hasEdge = false;
-        for (int i = 0; i < width * height; ++i) {
+        for (int i = 0; i < bannerWidth * bannerHeight; ++i) {
             const DWORD alpha = pixels[i] >> 24;
             if (alpha > 0 && alpha < 255) {
                 hasEdge = true;
-                Check(((pixels[i] >> 16) & 255) == GetRValue(color) * alpha / 255 &&
-                      ((pixels[i] >> 8) & 255) == GetGValue(color) * alpha / 255 &&
-                      (pixels[i] & 255) == GetBValue(color) * alpha / 255,
+                Check(((pixels[i] >> 16) & 255) == GetRValue(item.fill) * alpha / 255 &&
+                      ((pixels[i] >> 8) & 255) == GetGValue(item.fill) * alpha / 255 &&
+                      (pixels[i] & 255) == GetBValue(item.fill) * alpha / 255,
                       "banner edge colour premultiplied exactly once");
             }
         }
         Check(hasEdge, "banner has an anti-aliased edge");
         ReleaseBannerSurface();
     }
+
+    // 回归：切换输入法的横幅不能被上一次的大写锁定横幅带偏。曾经因为 ShowSwitchBanner
+    // 没把类型改回来，切中英文一直显示"大写/小写"。这里给个假窗口句柄，只为让入口函数
+    // 不提前返回；SetTimer 和 UpdateLayeredWindow 都会失败，但都不影响要检查的状态。
+    g_bannerWnd = reinterpret_cast<HWND>(1);
+    g_bannerKind = BannerKind::CapsLock;
+    g_bannerState = true;
+    g_bannerText = L"大写";
+    ShowSwitchBanner();
+    Check(g_bannerKind == BannerKind::InputMethod, "switch banner resets the banner kind");
+    ShowCapsLockBanner(true);
+    Check(g_bannerKind == BannerKind::CapsLock && wcscmp(g_bannerText, L"大写") == 0 &&
+          g_bannerState, "caps banner shows 大写 when the caps lock is on");
+    ShowCapsLockBanner(false);
+    Check(wcscmp(g_bannerText, L"小写") == 0 && !g_bannerState,
+          "caps banner shows 小写 when the caps lock is off");
+    ShowSwitchBanner();
+    Check(g_bannerKind == BannerKind::InputMethod, "switch banner wins again after a caps banner");
+    g_bannerWnd = nullptr;
     StopGdiplus();
     std::puts("PASS: 20 splash decode and release cycles, banner colours and alpha");
 }

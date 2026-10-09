@@ -15,6 +15,12 @@ DWORD g_hookThreadId = 0;
 bool g_capsDown = false;
 bool g_capsSwallowed = false;
 
+// 大写锁定的开关状态。钩子看得见每一次 CapsLock 的抬起，所以"放行一次就翻一次"，
+// 比去问系统的开关位可靠：那个位只在有焦点的线程输入队列里更新，本程序没有焦点。
+bool g_capsLockOn = false;
+// 本次物理按下走的是哪条路：true = 按着 Alt 放行（日志和提示文字要用）。
+bool g_capsPassedAsAlt = false;
+
 }  // 匿名命名空间
 
 bool SendCtrlSpace() {
@@ -65,11 +71,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 	if (nCode == HC_ACTION) {
 		const auto* pKeyboard = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
 
+		// 别的程序注入的 CapsLock 也会真的翻转系统的大写锁定，跟着数一下，
+		// 免得自己记的"大写锁定开着没有"慢慢跑偏。物理按键走下面的分支。
+		if (pKeyboard->vkCode == VK_CAPITAL && (pKeyboard->flags & LLKHF_INJECTED) != 0) {
+			if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+				g_capsLockOn = !g_capsLockOn;
+			}
+		}
+
 		if (pKeyboard->vkCode == VK_CAPITAL && (pKeyboard->flags & LLKHF_INJECTED) == 0) {
 			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
 				if (!g_capsDown) {
 					g_capsDown = true;
-					g_capsSwallowed = g_enabled && (pKeyboard->flags & LLKHF_ALTDOWN) == 0;
+					g_capsPassedAsAlt = (pKeyboard->flags & LLKHF_ALTDOWN) != 0;
+					g_capsSwallowed = g_enabled && !g_capsPassedAsAlt;
 					if (g_capsSwallowed) {
 						// 现在就把目标窗口记下来：排队中的请求不许切换到一个新应用。
 						g_capsSwallowed = PostMessageW(g_mainWnd, WM_SWITCH_IME,
@@ -87,6 +102,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 				if (swallowed) {
 					return 1;
 				}
+				// 这一次按键原样放行了（按着 Alt，或者映射被关掉），系统会把它那边的
+				// 大写锁定翻个个儿。回调里不能写日志（文件 I/O 会拖长钩子回调），而且此刻
+				// 按键还没被系统处理，所以等到抬起再通知主线程：既避开回调里的 I/O，
+				// 又保证系统那边已经翻完了。
+				g_capsLockOn = !g_capsLockOn;
+				PostMessageW(g_mainWnd, WM_CAPS_LOCK_PASSED, g_capsPassedAsAlt ? 1 : 0,
+				             g_capsLockOn ? 1 : 0);
 			}
 		}
 	}
@@ -94,8 +116,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 	return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-// 钩子的安装和回调都属于这个专用的消息线程。
-// 解码 PNG、弹菜单、跑 schtasks 都饿不死它的消息泵。
 // 钩子的安装和回调都属于这个专用的消息线程。
 // 解码 PNG、弹菜单、跑 schtasks 都饿不死它的消息泵。
 void ReplaceHookOnCurrentThread() {
@@ -112,6 +132,8 @@ DWORD WINAPI HookThreadProc(void*) {
 	MSG msg = {};
 	PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 	g_capsDown = (GetAsyncKeyState(VK_CAPITAL) & 0x8000) != 0;
+	// 线程的输入队列刚建好，这时读到的开关位就是系统当前的状态；之后靠回调里翻。
+	g_capsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
 	g_capsSwallowed = false;
 	ReplaceHookOnCurrentThread();
 	SetEvent(g_hookReadyEvent);

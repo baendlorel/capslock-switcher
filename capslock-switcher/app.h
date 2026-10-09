@@ -22,6 +22,9 @@ extern bool g_startupTaskInstalled;
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
 constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
+// CapsLock 这次没被映射掉（Alt+CapsLock，或者映射被关掉了）：只把这件事记进日志。
+// wParam 非 0 表示是 Alt 按着。
+constexpr UINT WM_CAPS_LOCK_PASSED = WM_APP + 4;
 
 // 主窗口上的定时器。
 constexpr UINT_PTR kTimerRetryStartup = 1;

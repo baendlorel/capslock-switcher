@@ -145,6 +145,11 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		// "开机启动"旁边那个勾。
 		g_startupTaskInstalled = QueryStartupTask();
 
+		// 启动时记一行：设置页的日志窗口一打开就能看到钩子和托盘图标有没有挂上。
+		Log(L"启动：键盘钩子 %s，托盘图标 %s",
+		    IsHookInstalled() ? L"已挂上" : L"没挂上",
+		    g_trayIconAdded ? L"已挂上" : L"没挂上");
+
 		if (StartGdiplus() && PrepareSplash()) {
 			ShowSplash();
 		}
@@ -167,10 +172,25 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		// 钩子在 CapsLock 按下时就记下了前台窗口：如果用户之后换了窗口，
 		// 这条请求就已经过期了。
 		if (g_enabled && reinterpret_cast<HWND>(wParam) == GetForegroundWindow()) {
-			SendCtrlSpace();
+			// 每按一下都记一行，设置页的日志窗口会跟着显示出来。
+			Log(SendCtrlSpace() ? L"CapsLock -> Ctrl+Space：切换输入法"
+			                    : L"CapsLock -> Ctrl+Space：注入失败，这次没切");
 			ShowSwitchBanner();
 		}
 		break;
+
+	case WM_CAPS_LOCK_PASSED: {
+		// 没被映射掉的那一次按键：要么按着 Alt，要么映射被关掉了。
+		// lParam 是钩子自己数出来的大写锁定状态（抬起时已经翻过）。
+		const bool upper = lParam != 0;
+		if (wParam != 0) {
+			Log(L"Alt+CapsLock：放行给原来的大写锁定（现在%s）", upper ? L"大写" : L"小写");
+			ShowCapsLockBanner(upper);
+		} else {
+			Log(L"映射已关闭：CapsLock 原样放行（现在%s）", upper ? L"大写" : L"小写");
+		}
+		break;
+	}
 
 	case WM_TRAYICON:
 		// 双击直接开设置页，右键出菜单（菜单里也有"设置..."）。
