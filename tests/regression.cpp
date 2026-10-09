@@ -1,5 +1,5 @@
-// Isolated regression checks: keyboard APIs are mocked, so no keys are injected
-// and no global keyboard hook is installed while running this executable.
+﻿// 独立的回归检查：键盘 API 全部用替身，所以运行这个可执行文件期间
+// 不会注入任何按键，也不会安装全局键盘钩子。
 #define NOMINMAX
 #include <Windows.h>
 #include <vector>
@@ -137,41 +137,18 @@ static void TestKeyboard() {
 }
 
 static void TestRendering() {
-    Check(!RenderOverlay(132, 96), "overlay refuses rendering without GDI+");
     Gdiplus::GdiplusStartupInput startup;
     Check(Gdiplus::GdiplusStartup(&g_gdiplusToken, &startup, nullptr) == Gdiplus::Ok, "GDI+ startup");
     g_gdiplusReady = true;
     g_hInst = GetModuleHandleW(nullptr);
     for (int pass = 0; pass < 20; ++pass) {
-        g_overlayChinese = (pass % 2) != 0;
-        wcscpy_s(g_overlayText, g_overlayChinese ? L"\u4E2D" : L"En");
-        const int dpi = pass % 2 ? 144 : 96;
-        const int size = MulDiv(kOverlaySizeDip, dpi, 96);
-        Check(RenderOverlay(size, dpi), "overlay renders at multiple DPIs");
-        const auto* pixels = static_cast<const DWORD*>(g_overlayBits);
-        Check(pixels[0] == 0, "badge corner is transparent");
-        Check((pixels[size * 10 + size / 2] >> 24) == 255, "badge interior opaque");
-        const COLORREF color = g_overlayChinese ? kOverlayChineseColor : kOverlayEnglishColor;
-        bool hasEdge = false;
-        for (int i = 0; i < size * size; ++i) {
-            const DWORD alpha = pixels[i] >> 24;
-            if (alpha > 0 && alpha < 255) {
-                hasEdge = true;
-                Check(((pixels[i] >> 16) & 255) == GetRValue(color) * alpha / 255 &&
-                      ((pixels[i] >> 8) & 255) == GetGValue(color) * alpha / 255 &&
-                      (pixels[i] & 255) == GetBValue(color) * alpha / 255,
-                      "edge colour premultiplied exactly once");
-            }
-        }
-        Check(hasEdge, "anti-aliased edge exists");
         Check(PrepareSplash(), "embedded PNG decodes and draws with source stream alive");
         Check(g_splashWidth > 0 && g_splashHeight > 0, "splash dimensions valid");
         ReleaseSplash();
-        ReleaseOverlay();
     }
     Gdiplus::GdiplusShutdown(g_gdiplusToken);
     g_gdiplusReady = false;
-    std::puts("PASS: 20 splash/overlay render and release cycles, alpha and DPI");
+    std::puts("PASS: 20 splash decode and release cycles");
 }
 
 static void TestHookThread() {
@@ -183,7 +160,7 @@ static void TestHookThread() {
         Check(hookOwner.load() != GetCurrentThreadId(), "hook belongs to a dedicated thread");
         Check(WaitForSingleObject(hookInstalledEvent, 1000) == WAIT_OBJECT_0, "initial install observed");
         Check(PostThreadMessageW(g_hookThreadId, WM_REINSTALL_HOOK, 0, 0) != FALSE, "renewal queued");
-        // No UI message pumping here: renewal must proceed independently.
+        // 这里不跑 UI 消息循环：重挂必须能独立进行。
         Check(WaitForSingleObject(hookInstalledEvent, 1000) == WAIT_OBJECT_0, "renewal works with UI thread blocked");
         UninstallHook();
         Check(g_hKeyboardHook.load() == nullptr && g_hookThread == nullptr &&

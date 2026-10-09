@@ -1,6 +1,5 @@
-#define NOMINMAX
+﻿#define NOMINMAX
 #include <Windows.h>
-#include <imm.h>
 #include <shellapi.h>
 #include <gdiplus.h>
 #include <cstdarg>
@@ -13,9 +12,8 @@
 #include "version.h"
 #include "resource.h"
 
-// imm32 for the IME state query, gdiplus for decoding the splash PNG. Declared
-// here so the project file needs no edit.
-#pragma comment(lib, "imm32.lib")
+// gdiplus 用来解码启动画面的 PNG，键帽的逐像素透明就靠它。链接在这里声明，
+// 项目文件都不用改。
 #pragma comment(lib, "gdiplus.lib")
 
 namespace {
@@ -23,102 +21,60 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"CapsLockSwitcherClass";
 constexpr wchar_t kWindowTitle[] = L"CapsLock Switcher";
 constexpr wchar_t kMutexName[] = L"CapsLockSwitcherMutex";
-constexpr wchar_t kOverlayClass[] = L"CapsLockSwitcherOverlay";
 
-// Non-English text below is written as \u escapes on purpose: this file is kept pure
-// ASCII so the compiler never has to guess a source code page. A BOM-less UTF-8 file
-// is decoded as the system code page, and a multi-byte character then swallows the
-// closing quote of the literal it sits in. For reference, in order of appearance:
-//   \u5DF2\u542F\u7528 = "enabled", \u5DF2\u7981\u7528 = "disabled",
-//   \u6620\u5C04 = "mapping", \u542F\u7528 = "enable",
-//   \u4E2D = the Chinese glyph the overlay shows.
+// 字符串里的中文一律写成 \u 转义，例如 \u542F\u7528 就是"启用"：这样即使文件
+// 被存成不带 BOM，也不会在按系统代码页解释（中文系统是 936）时，让多字节字符
+// 吞掉它所在字符串的结尾引号。注释改用中文，所以本文件保存为 UTF-8 带 BOM，
+// 见 README。按出现顺序对照：
+//   \u5DF2\u542F\u7528 = "已启用"，\u5DF2\u7981\u7528 = "已禁用"，
+//   \u6620\u5C04 = "映射"，\u542F\u7528 = "启用"，
 constexpr wchar_t kTooltipOn[] = L"CapsLock Switcher - \u5DF2\u542F\u7528";
 constexpr wchar_t kTooltipOff[] = L"CapsLock Switcher - \u5DF2\u7981\u7528";
 
-// Registered (system-wide) message, so a second launch can talk to the instance
-// that already owns the mutex.
+// 注册成系统级消息，好让第二次启动能和已经持有互斥体的实例说上话。
+// 名字见下面的 kShowYourselfMessage。
 constexpr wchar_t kShowYourselfMessage[] = L"CapsLockSwitcher.ShowYourself";
 
-// Application-private messages live above WM_APP. WM_USER is reserved for the
-// window class itself, so keep out of that range.
+// 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，
+// 不要占用。
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
 constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
 
-// Tray menu command ids.
+// 托盘菜单命令 ID。
 constexpr UINT kMenuIdToggleMapping = 1;
 constexpr UINT kMenuIdToggleStartup = 2;
 constexpr UINT kMenuIdExit = 3;
 
 constexpr UINT_PTR kTimerRetryStartup = 1;
 constexpr UINT_PTR kTimerSelfHeal = 2;
-constexpr UINT_PTR kTimerShowImeState = 3;
-constexpr UINT_PTR kTimerOverlayFade = 4;
-constexpr UINT_PTR kTimerSplashFade = 5;
-constexpr UINT_PTR kTimerRefreshStartup = 6;
+constexpr UINT_PTR kTimerSplashFade = 3;
+constexpr UINT_PTR kTimerRefreshStartup = 4;
 
 constexpr UINT kRetryStartupMs = 2000;
 
-// Windows removes a low-level hook whose callback takes longer than
-// LowLevelHooksTimeout, and on Windows 7 and later it does so silently - there is
-// no notification and no API to ask whether our hook is still installed. It also
-// gives no notice when a tray icon is dropped. Re-asserting both on a slow timer is
-// the only way to keep working through a long session.
+// 回调耗时超过 LowLevelHooksTimeout 的低级钩子会被 Windows 摘掉，而且从
+// Windows 7 起是静默摘掉的：既没有通知，也没有接口能查询钩子是否还在。
+// 托盘图标被丢掉时同样不给任何提示。所以只能用一个慢速定时器把两者重新
+// 挂上，这是长时间运行后还能继续工作的唯一办法。
 constexpr UINT kSelfHealMs = 60000;
 
-// The injected Ctrl+Space needs a moment to be registered by the target window and
-// its IME before asking which mode it landed in.
-constexpr UINT kImeQueryDelayMs = 50;
-
-// Switching the IME directly through its own window instead of injecting a
-// keystroke. It is only ever trusted when the IME confirms the new state, because
-// WM_IME_CONTROL's return value is not specified for these commands and an IME is
-// free to accept the message and ignore it - so "the call returned" proves nothing.
-// Set to false to always fall back to the injected hotkey.
-constexpr bool kPreferImeApi = true;
-constexpr WPARAM kImeSetConversionMode = 0x0002;  // IMC_SETCONVERSIONMODE
-constexpr UINT kImeApiTimeoutMs = 150;
-constexpr int kImeApiVerifyAttempts = 4;
-constexpr DWORD kImeApiVerifyDelayMs = 8;
-
-// Overlay: shown centred, held, then faded out. Sizes are in DIPs and get scaled.
-constexpr int kOverlaySizeDip = 132;
-constexpr int kOverlayTextDip = 62;
-constexpr int kOverlayRadiusDip = 26;   // corner radius of the rounded badge
-// Fully opaque so the two state colours show up exactly as specified; the fade-out
-// still animates this value down from here.
-constexpr int kOverlayAlpha = 255;
-constexpr int kOverlayFadeStep = 22;
-constexpr UINT kOverlayHoldMs = 500;
-constexpr UINT kOverlayFadeStepMs = 16;
-constexpr wchar_t kOverlayFontFace[] = L"Microsoft YaHei UI";
-
-// Overlay colours: blue while the IME is English, red while it is Chinese.
-constexpr COLORREF kOverlayEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
-constexpr COLORREF kOverlayChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
-
-// Startup splash: the keycap image, held for a moment and then faded out. It needs
-// its own window because it has per-pixel alpha, which rules out the single
-// window-wide alpha the overlay uses.
+// 启动画面：键帽图先停留片刻再淡出，需要单独一个窗口——它带逐像素 Alpha，
+// 整窗统一透明度表达不出这种效果。
 constexpr wchar_t kSplashClass[] = L"CapsLockSwitcherSplash";
 constexpr int kSplashAlphaMax = 255;
-constexpr UINT kSplashHoldMs = 500;  // stay fully opaque this long
-constexpr UINT kSplashFadeMs = 300;  // then fade out over this long
-constexpr UINT kSplashTickMs = 15;   // granularity of the fade timer
-constexpr int kSplashMaxHeightPercent = 30;  // of the work area height; never upscaled
+constexpr UINT kSplashHoldMs = 500;  // 这段时间保持完全不透明
+constexpr UINT kSplashFadeMs = 300;  // 之后用这么长时间淡出
+constexpr UINT kSplashTickMs = 15;   // 淡出定时器的粒度
+constexpr int kSplashMaxHeightPercent = 30;  // 占工作区高度的比例；从不放大
 
-// Autostart: a logon task that the task scheduler runs with highest privileges, so
-// logging on does not raise a UAC prompt. Creating it does need administrator
-// rights, which is why the toggle re-launches this program elevated.
+// 开机启动：一条"登录时"计划任务，由任务计划程序以最高权限拉起，
+// 所以登录不会弹 UAC。创建这条任务本身需要管理员权限，
+// 这正是那个勾选项要提权重新启动本程序的原因。
 constexpr wchar_t kStartupTaskName[] = L"CapsLock Switcher";
 constexpr wchar_t kCommandStartupEnable[] = L"--startup-enable";
 constexpr wchar_t kCommandStartupDisable[] = L"--startup-disable";
 constexpr UINT kStartupRefreshDelayMs = 3000;
-
-// IMC_GETCONVERSIONMODE, sent to the IME window through WM_IME_CONTROL. It is the
-// GET counterpart of IMC_SETCONVERSIONMODE (0x0002), which immdev.h documents;
-// imm.h does not declare the GET form.
-constexpr WPARAM kImeGetConversionMode = 0x0001;
 
 HINSTANCE g_hInst = nullptr;
 HWND g_hWnd = nullptr;
@@ -127,39 +83,19 @@ HANDLE g_hookThread = nullptr;
 HANDLE g_hookStopEvent = nullptr;
 HANDLE g_hookReadyEvent = nullptr;
 DWORD g_hookThreadId = 0;
-// Only the hook thread accesses the current physical CapsLock press.
+// 当前"物理按下 CapsLock"的状态只有钩子线程会碰。
 bool g_capsDown = false;
 bool g_capsSwallowed = false;
-HWND g_imeTarget = nullptr;
 NOTIFYICONDATA g_nid = {};
 bool g_trayIconAdded = false;
 UINT g_taskbarCreatedMessage = 0;
 UINT g_showYourselfMessage = 0;
 
-// The switch the tray menu drives. While it is off the hook lets CapsLock through
-// untouched, so the key behaves exactly like a normal CapsLock again.
+// 托盘菜单控制的那个开关。关掉时钩子原样放行 CapsLock，
+// 这个键就恢复成普通的 CapsLock。
 std::atomic_bool g_enabled{ true };
 
-HWND g_overlayWnd = nullptr;
-wchar_t g_overlayText[8] = {};
-// Which of the two states the overlay is currently showing, so the render step can
-// pick the matching background colour.
-bool g_overlayChinese = false;
-// The badge is drawn into its own premultiplied ARGB surface and pushed to the
-// window, so that its rounded corners can be genuinely transparent.
-HBITMAP g_overlayBitmap = nullptr;
-HDC g_overlayMemDc = nullptr;
-void* g_overlayBits = nullptr;
-int g_overlayWidth = 0;
-int g_overlayHeight = 0;
-int g_overlayAlpha = 0;
-UINT g_overlayHoldTicks = 0;
-
-// Last state we actually managed to read, so a failed query reuses it instead of
-// flashing a wrong answer.
-bool g_lastImeWasChinese = false;
-
-// Startup splash window and the premultiplied ARGB surface it draws.
+// 启动画面窗口，以及它绘制用的预乘 Alpha（ARGB）位图。
 HWND g_splashWnd = nullptr;
 HBITMAP g_splashBitmap = nullptr;
 HDC g_splashMemDc = nullptr;
@@ -167,9 +103,9 @@ void* g_splashBits = nullptr;
 int g_splashWidth = 0;
 int g_splashHeight = 0;
 int g_splashAlpha = 0;
-ULONGLONG g_splashFadeStart = 0;  // tick at which the fade is due to begin
+ULONGLONG g_splashFadeStart = 0;  // 该开始淡出的 tick
 
-// Cached answer to "is the logon task installed?", refreshed at startup and after a change.
+// 缓存"登录任务装没装"的答案，启动时和每次改动之后刷新。
 bool g_startupTaskInstalled = false;
 
 ULONG_PTR g_gdiplusToken = 0;
@@ -183,12 +119,10 @@ ULONGLONG g_installTroubleTick = 0;
 unsigned g_installAttempts = 0;
 
 // ---------------------------------------------------------------------------
-// Diagnostics
+// 诊断日志
 //
-// A log that cannot be written must not stop the program from starting or from
-// shutting down cleanly, so every failure in here is swallowed deliberately.
-// The file sits next to the executable and gets a UTF-8 byte order mark the
-// first time it is created.
+// 写不进日志绝不能妨碍程序启动或干净退出，所以这里所有失败都故意吞掉。
+// 日志文件放在 exe 旁边，第一次创建时会写入 UTF-8 的字节序标记（BOM）。
 // ---------------------------------------------------------------------------
 
 void AppendLogLine(const wchar_t* line) {
@@ -196,7 +130,7 @@ void AppendLogLine(const wchar_t* line) {
 		return;
 	}
 
-	// GENERIC_WRITE also carries the attribute access GetFileSizeEx needs.
+	// GENERIC_WRITE 同时也带来 GetFileSizeEx 需要的属性访问权限。
 	const HANDLE file = CreateFileW(g_logPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
 	                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (file == INVALID_HANDLE_VALUE) {
@@ -217,14 +151,14 @@ void AppendLogLine(const wchar_t* line) {
 	                                      static_cast<int>(sizeof(utf8)), nullptr, nullptr);
 	if (chars > 1) {
 		DWORD written = 0;
-		// chars includes the terminating NUL, which does not belong in the file.
+		// chars 把结尾的 NUL 也算在内，而 NUL 不属于文件内容。
 		WriteFile(file, utf8, static_cast<DWORD>(chars - 1), &written, nullptr);
 	}
 
 	CloseHandle(file);
 }
 
-// Records the executable directory and derives the log path from it.
+// 记下可执行文件所在目录，并据此推出日志路径。
 void BuildPaths() {
 	const DWORD length = GetModuleFileNameW(nullptr, g_exePath, _countof(g_exePath));
 	if (length == 0 || length >= _countof(g_exePath)) {
@@ -274,7 +208,7 @@ const wchar_t* ErrorText(const DWORD code, wchar_t (&buffer)[512]) {
 		wcscpy_s(buffer, L"(no system text for this code)");
 		return buffer;
 	}
-	// FormatMessage leaves a trailing CR/LF (and sometimes a full stop plus space).
+	// FormatMessage 会在结尾留下 CR/LF（有时还多一个句点和空格）。
 	for (size_t len = wcslen(buffer); len > 0; --len) {
 		const wchar_t c = buffer[len - 1];
 		if (c == L'\r' || c == L'\n' || c == L' ' || c == L'\t' || c == L'.') {
@@ -303,8 +237,8 @@ void LogEnvironment() {
 	Log(L"version         : %hs (%s)", APP_VERSION, sizeof(void*) == 8 ? L"x64" : L"x86");
 	Log(L"executable      : %s", g_exePath);
 	Log(L"log file        : %s", g_logPath);
-	// ProductName in the registry still reads "Windows 10" on Windows 11, so take
-	// the family from the build number and keep the registry strings as detail.
+	// 注册表里的 ProductName 在 Windows 11 上仍然写着 "Windows 10"，
+	// 所以系统大版本按 build 号判断，注册表字符串只当细节保留。
 	const unsigned long buildNumber = wcstoul(build, nullptr, 10);
 	const wchar_t* family = buildNumber >= 22000 ? L"Windows 11"
 	                      : buildNumber >= 10240 ? L"Windows 10"
@@ -314,9 +248,8 @@ void LogEnvironment() {
 	Log(L"uptime          : %llu ms since start", GetTickCount64() - g_startTick);
 }
 
-// The message loop returned -1. Note that GetMessageW leaves MSG untouched in that
-// case, so there is nothing to dispatch - what follows is everything the process
-// can still observe about why it happened.
+// 消息循环返回了 -1。注意这种情况下 GetMessageW 不会碰 MSG，所以没有任何东西
+// 可以派发；下面记录的是进程还能观察到的、关于"为什么失败"的一切。
 void LogMessageLoopFailure(const DWORD lastError) {
 	wchar_t text[512] = {};
 
@@ -334,7 +267,7 @@ void LogMessageLoopFailure(const DWORD lastError) {
 }
 
 bool SendCtrlSpace() {
-	// Never release a modifier (or Space) that the user is still holding.
+	// 用户还按着的修饰键（以及 Space）绝不替他抬起。
 	if ((GetAsyncKeyState(VK_SPACE) & 0x8000) != 0) {
 		return false;
 	}
@@ -361,7 +294,7 @@ bool SendCtrlSpace() {
 		return true;
 	}
 	const DWORD error = GetLastError();
-	// A partial insertion must not leave our synthetic keys pressed.
+	// 部分插入失败时，不能把自己合成的按键留在按下状态。
 	INPUT releases[2] = {};
 	UINT releaseCount = 0;
 	if (sent > (ownCtrl ? 1u : 0u)) {
@@ -387,7 +320,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 					g_capsDown = true;
 					g_capsSwallowed = g_enabled && (pKeyboard->flags & LLKHF_ALTDOWN) == 0;
 					if (g_capsSwallowed) {
-						// Capture the target now; a queued request must not switch a new app.
+						// 现在就把目标窗口记下来：排队中的请求不许切换到一个新应用。
 						g_capsSwallowed = PostMessageW(g_hWnd, WM_SWITCH_IME,
 						    reinterpret_cast<WPARAM>(GetForegroundWindow()), 0) != FALSE;
 					}
@@ -410,8 +343,8 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 	return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-// All hook installation and callbacks belong to this dedicated message thread.
-// Slow IME calls, PNG decoding, menus and schtasks cannot starve its message pump.
+// 钩子的安装和回调都属于这个专用的消息线程。
+// 解码 PNG、弹菜单、跑 schtasks 都饿不死它的消息泵。
 void ReplaceHookOnCurrentThread() {
 	const HHOOK replacement = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hInst, 0);
 	if (replacement != nullptr) {
@@ -502,7 +435,7 @@ void FillTrayData(const HWND hwnd) {
 	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 	g_nid.uCallbackMessage = WM_TRAYICON;
 	if (g_nid.hIcon == nullptr) {
-		// Fall back to a stock icon rather than handing the shell a NULL HICON.
+		// 宁可退回到系统自带图标，也不给外壳传一个 NULL HICON。
 		g_nid.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_MAINICON));
 		if (g_nid.hIcon == nullptr) {
 			g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
@@ -520,10 +453,9 @@ bool AddTrayIcon(const HWND hwnd) {
 	return g_trayIconAdded;
 }
 
-// Refreshes the icon in place, and re-registers it when the shell no longer has
-// it. Going through NIM_MODIFY first is what keeps g_trayIconAdded honest: an
-// unconditional NIM_ADD would fail for an icon that is already there and leave us
-// believing it is missing, so the icon would never be removed on exit.
+// 就地刷新图标，外壳那边已经没有了就重新注册。先走 NIM_MODIFY 才能让
+// g_trayIconAdded 保持可信：对一个本来就在的图标，无条件 NIM_ADD 会失败，
+// 于是我们会误以为图标不在，退出时就永远不会去删它。
 void RefreshTrayIcon(const HWND hwnd) {
 	FillTrayData(hwnd);
 	if (!g_trayIconAdded || !Shell_NotifyIconW(NIM_MODIFY, &g_nid)) {
@@ -550,8 +482,8 @@ void ShowBalloon(const wchar_t* text) {
 	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
-// Keeps the hover text in step with the switch, so the state is visible without
-// opening the menu. Also gets used whenever the icon is (re)added.
+// 让悬停提示跟着开关走，不打开菜单也能看出状态。
+// 图标每次（重新）挂上时也会用到。
 void UpdateTrayTooltip() {
 	if (!g_trayIconAdded) {
 		return;
@@ -568,13 +500,12 @@ void SetMappingEnabled(const bool enabled) {
 }
 
 // ---------------------------------------------------------------------------
-// Autostart
+// 开机启动
 //
-// "Start at logon, with administrator rights, without a UAC prompt" is exactly a
-// scheduled task with the highest run level - a shortcut in the Startup folder
-// could not do the elevated part. Creating that task needs administrator rights
-// itself, so the menu item re-launches this program through the UAC prompt with a
-// switch that tells it to do just this job and exit.
+// "登录时启动、带管理员权限、还不弹 UAC"，这正好就是一条"最高权限"的
+// 计划任务——启动文件夹里的快捷方式做不到提权那一半。创建这条任务本身需要
+// 管理员权限，所以菜单项会带一个参数、通过 UAC 提示重新拉起本程序，
+// 让那个副本只干这件事然后退出。
 // ---------------------------------------------------------------------------
 
 bool IsProcessElevated() {
@@ -590,9 +521,8 @@ bool IsProcessElevated() {
 	return ok && elevation.TokenIsElevated != 0;
 }
 
-// Runs a command line and returns its exit code (-1 when it could not be started).
-// The output is discarded on purpose: only the exit status matters, which keeps
-// this independent of the display language.
+// 跑一条命令行并返回它的退出码（起不来时返回 -1）。输出是故意丢掉的：
+// 只有退出码有意义，这样就不受系统显示语言影响。
 DWORD RunAndWait(const wchar_t* commandLine) {
 	wchar_t mutableLine[2048] = {};
 	wcscpy_s(mutableLine, commandLine);
@@ -621,7 +551,7 @@ const wchar_t* SchtasksPath() {
 		if (GetWindowsDirectoryW(windows, MAX_PATH) != 0) {
 			swprintf_s(path, L"%s\\System32\\schtasks.exe", windows);
 			if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
-				wcscpy_s(path, L"schtasks.exe");  // fall back to the PATH
+				wcscpy_s(path, L"schtasks.exe");  // 退回 PATH 里找
 			}
 		} else {
 			wcscpy_s(path, L"schtasks.exe");
@@ -630,8 +560,8 @@ const wchar_t* SchtasksPath() {
 	return path;
 }
 
-// schtasks reports "exit code 0 == the task exists" whatever the display language,
-// and querying needs no elevation.
+// 不管系统是什么显示语言，schtasks 都是"退出码 0 就说明任务存在"，
+// 而且查询不需要提权。
 bool QueryStartupTask() {
 	wchar_t command[1024] = {};
 	swprintf_s(command, L"\"%s\" /Query /TN \"%s\"", SchtasksPath(), kStartupTaskName);
@@ -640,8 +570,7 @@ bool QueryStartupTask() {
 
 bool InstallStartupTask() {
 	wchar_t command[2048] = {};
-	// /RL HIGHEST is what makes the scheduler start it elevated, so logging on stays
-	// prompt-free.
+	// 靠 /RL HIGHEST 让任务计划程序以提权方式启动它，登录时才不会弹窗。
 	swprintf_s(command,
 	           L"\"%s\" /Create /TN \"%s\" /TR \"\\\"%s\\\"\" /SC ONLOGON /RL HIGHEST /F",
 	           SchtasksPath(), kStartupTaskName, g_exePath);
@@ -671,8 +600,8 @@ void SetStartupEnabled(const bool enable) {
 		return;
 	}
 
-	// Not elevated, so hand the job to an elevated copy of ourselves. That is the
-	// UAC prompt the administrator requirement implies.
+	// 自己没提权，就把这件事交给一个提权后的自己去做——这也就是
+	// "需要管理员权限"必然带来的一次 UAC 提示。
 	const HINSTANCE launched = ShellExecuteW(nullptr, L"runas", g_exePath,
 	                                        enable ? kCommandStartupEnable : kCommandStartupDisable,
 	                                        nullptr, SW_HIDE);
@@ -683,11 +612,11 @@ void SetStartupEnabled(const bool enable) {
 		return;
 	}
 
-	// The helper runs asynchronously, so look at the state again shortly.
+	// 提权副本是异步跑的，所以过一会儿再重新看一眼状态。
 	SetTimer(g_hWnd, kTimerRefreshStartup, kStartupRefreshDelayMs, nullptr);
 }
 
-// The elevated helper: do the job, then leave without ever creating a window.
+// 提权副本：干完活就走，自始至终不创建窗口。
 int RunStartupHelper(const bool enable) {
 	g_startTick = GetTickCount64();
 	BuildPaths();
@@ -700,17 +629,11 @@ int RunStartupHelper(const bool enable) {
 }
 
 // ---------------------------------------------------------------------------
-// Input-method state overlay
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Layered surfaces
+// 分层窗口
 //
-// The IME badge and the startup splash are both layered windows fed straight from a
-// premultiplied ARGB bitmap. That is what buys real per-pixel transparency, which
-// in turn is what lets the badge have properly rounded, anti-aliased corners: a
-// colour key would leave them jagged, and the single window-wide alpha the badge
-// used to rely on could not make the corners transparent at all.
+// 启动画面是一个分层窗口，内容直接来自一张预乘 Alpha 的 ARGB 位图：
+// 这样才有真正的逐像素透明，键帽边缘能干净地合成，
+// 而不是留下色键（colour key）那种黑框。
 // ---------------------------------------------------------------------------
 
 RECT WorkAreaFor(const HWND reference) {
@@ -725,12 +648,11 @@ RECT WorkAreaFor(const HWND reference) {
 	return area;
 }
 
-// Every size in this program is expressed in DIPs and scaled through here. With the
-// process DPI-aware this is the real display DPI, so the surfaces are drawn at the
-// pixel resolution of the screen instead of being stretched up to it - stretching
-// was exactly what made the glyph look blurred.
+// 程序里所有尺寸都用 DIP 表示，在这里统一缩放。进程声明了 DPI 感知之后，
+// 这里拿到的是屏幕的真实 DPI，所以启动画面按屏幕像素分辨率绘制，
+// 而不是被拉伸上去——拉伸正是它以前发虚的原因。
 int ScreenDpi(const HWND reference = nullptr, const HWND surfaceWindow = nullptr) {
-	// Query our own DPI-aware window, since the foreground app might be DPI-unaware.
+	// 查自己那个 DPI 感知的窗口，因为前台应用可能根本不感知 DPI。
 	const auto getWindowDpi = reinterpret_cast<UINT(WINAPI*)(HWND)>(
 	    GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
 	if (getWindowDpi != nullptr && surfaceWindow != nullptr) {
@@ -745,7 +667,7 @@ int ScreenDpi(const HWND reference = nullptr, const HWND surfaceWindow = nullptr
 			return static_cast<int>(dpi);
 		}
 	}
-	// Windows 8.1 has no GetDpiForWindow.
+	// Windows 8.1 没有 GetDpiForWindow。
 	const HMODULE shcore = LoadLibraryExW(L"shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 	if (shcore != nullptr) {
 		using GetMonitorDpiFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
@@ -766,12 +688,11 @@ int ScreenDpi(const HWND reference = nullptr, const HWND surfaceWindow = nullptr
 	return dpi > 0 ? dpi : 96;
 }
 
-// Opts the process into per-monitor DPI awareness. Without it Windows renders our
-// windows into a smaller virtual surface and stretches the result up to the screen,
-// which is exactly the "blown up and blurred" look the badge used to have.
+// 让进程声明"每显示器 DPI 感知"。不声明的话，Windows 会先把我们的窗口
+// 渲染到一张更小的虚拟画布上，再拉伸到屏幕，启动画面就会像被放大过一样发虚。
 void EnableDpiAwareness() {
-	// Windows 10 1703 and later. Resolved dynamically so the executable still starts
-	// on a system whose user32 predates the export.
+	// Windows 10 1703 及以后。用动态解析，好让程序在导出符号更老的
+	// user32 上也能启动。
 	const HMODULE user32 = GetModuleHandleW(L"user32.dll");
 	if (user32 != nullptr) {
 		using SetContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -783,21 +704,21 @@ void EnableDpiAwareness() {
 		}
 	}
 
-	// Windows 8.1 fallback.
+	// Windows 8.1 的回退方案。
 	const HMODULE shcore = LoadLibraryExW(L"shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 	if (shcore != nullptr) {
 		using SetAwarenessFn = HRESULT(WINAPI*)(int);
 		const auto setAwareness = reinterpret_cast<SetAwarenessFn>(
 		    GetProcAddress(shcore, "SetProcessDpiAwareness"));
 		const bool ok = setAwareness != nullptr &&
-		                setAwareness(2 /* PROCESS_PER_MONITOR_DPI_AWARE */) == S_OK;
+		                setAwareness(2 /* 每显示器 DPI 感知 */) == S_OK;
 		FreeLibrary(shcore);
 		if (ok) {
 			return;
 		}
 	}
 
-	SetProcessDPIAware();  // Vista and later
+	SetProcessDPIAware();  // Vista 及以后
 }
 
 bool CreateArgbSurface(const int width, const int height, HBITMAP& bitmap, HDC& memoryDc, void*& bits) {
@@ -807,7 +728,7 @@ bool CreateArgbSurface(const int width, const int height, HBITMAP& bitmap, HDC& 
 	BITMAPINFO info = {};
 	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 	info.bmiHeader.biWidth = width;
-	info.bmiHeader.biHeight = -height;  // top-down, matching the layout GDI+ writes
+	info.bmiHeader.biHeight = -height;  // 自顶向下，和 GDI+ 写入的布局一致
 	info.bmiHeader.biPlanes = 1;
 	info.bmiHeader.biBitCount = 32;
 	info.bmiHeader.biCompression = BI_RGB;
@@ -846,8 +767,8 @@ void DestroyArgbSurface(HBITMAP& bitmap, HDC& memoryDc, void*& bits) {
 	bits = nullptr;
 }
 
-// Centres the surface on the monitor the reference window sits on and pushes it with
-// the given constant alpha, which is how both windows fade.
+// 把位图居中放到参考窗口所在的那台显示器上，并按给定的整体透明度推给窗口；
+// 启动画面就是靠它淡出的。
 bool PushLayeredSurface(const HWND hwnd, const HDC sourceDc, const int width, const int height,
                         const int alpha, const HWND monitorReference) {
 	if (hwnd == nullptr || sourceDc == nullptr || width <= 0 || height <= 0) {
@@ -870,338 +791,19 @@ bool PushLayeredSurface(const HWND hwnd, const HDC sourceDc, const int width, co
 	                           &blend, ULW_ALPHA) != FALSE;
 }
 
-// Neither surface is painted, they are both pushed, so they share this.
+// 启动画面只是被"推"上去、并不绘制，所以不需要自定义处理。
 LRESULT CALLBACK SurfaceProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) {
 	return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-void AddRoundedRectangle(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& r,
-                         const Gdiplus::REAL radius) {
-	const Gdiplus::REAL diameter = radius * 2.0f;
-	path.AddArc(r.X, r.Y, diameter, diameter, 180.0f, 90.0f);
-	path.AddArc(r.GetRight() - diameter, r.Y, diameter, diameter, 270.0f, 90.0f);
-	path.AddArc(r.GetRight() - diameter, r.GetBottom() - diameter, diameter, diameter, 0.0f, 90.0f);
-	path.AddArc(r.X, r.GetBottom() - diameter, diameter, diameter, 90.0f, 90.0f);
-	path.CloseFigure();
-}
-
-// Coverage of a rounded square at one pixel, sampled on a 4x4 sub-grid.
-unsigned char RoundedSquareCoverage(const int px, const int py, const int size,
-                                    const Gdiplus::REAL radius) {
-	const Gdiplus::REAL inner = static_cast<Gdiplus::REAL>(size) - radius;
-	int hits = 0;
-	for (int sy = 0; sy < 4; ++sy) {
-		for (int sx = 0; sx < 4; ++sx) {
-			const Gdiplus::REAL x = static_cast<Gdiplus::REAL>(px) + (sx + 0.5f) * 0.25f;
-			const Gdiplus::REAL y = static_cast<Gdiplus::REAL>(py) + (sy + 0.5f) * 0.25f;
-			// Clamping into the inner rectangle turns the four arcs into a distance
-			// test against the nearest corner centre.
-			Gdiplus::REAL nx = x < radius ? radius : (x > inner ? inner : x);
-			Gdiplus::REAL ny = y < radius ? radius : (y > inner ? inner : y);
-			const Gdiplus::REAL dx = x - nx;
-			const Gdiplus::REAL dy = y - ny;
-			if ((dx * dx + dy * dy) <= (radius * radius)) {
-				++hits;
-			}
-		}
-	}
-	return static_cast<unsigned char>(hits * 255 / 16);
-}
-
-// Writes the alpha channel of the overlay surface from the badge's own geometry.
-// Needed because GDI does not maintain an alpha channel (and GDI+ text, the only
-// thing that would, costs seconds in font enumeration), so the mask is stamped on
-// after the colour has been drawn.
-void StampRoundedAlpha(const int size, const Gdiplus::REAL radius) {
-	DWORD* pixels = static_cast<DWORD*>(g_overlayBits);
-	if (pixels == nullptr) {
-		return;
-	}
-	for (int y = 0; y < size; ++y) {
-		for (int x = 0; x < size; ++x) {
-			const unsigned char coverage = RoundedSquareCoverage(x, y, size, radius);
-			DWORD& pixel = pixels[(y * size) + x];
-			if (coverage == 255) {
-				pixel |= 0xFF000000u;  // inside: opaque, colour untouched
-			} else if (coverage == 0) {
-				pixel = 0;
-			} else {
-				// The GDI+ edge is already premultiplied. Rebuild its solid badge
-				// colour using our coverage instead of multiplying its alpha twice.
-				const COLORREF fill = g_overlayChinese ? kOverlayChineseColor : kOverlayEnglishColor;
-				const DWORD red = (GetRValue(fill) * coverage) / 255;
-				const DWORD green = (GetGValue(fill) * coverage) / 255;
-				const DWORD blue = (GetBValue(fill) * coverage) / 255;
-				pixel = (static_cast<DWORD>(coverage) << 24) | (red << 16) | (green << 8) | blue;
-			}
-		}
-	}
-}
-
-// True when the foreground window's IME sits in a native (Chinese) input mode.
-bool ForegroundImeIsChinese() {
-	const HWND foreground = GetForegroundWindow();
-	if (foreground == nullptr) {
-		return g_lastImeWasChinese;
-	}
-
-	// Do NOT use ImmGetContext here. An IME context belongs to a thread's input
-	// queue, so for a window owned by another thread - which is every window this
-	// program ever inspects - it simply returns NULL, and every answer would come
-	// out "English". The IME window answers across process boundaries instead.
-	const HWND imeWnd = ImmGetDefaultIMEWnd(foreground);
-	if (imeWnd == nullptr) {
-		return g_lastImeWasChinese;
-	}
-
-	// kImeGetConversionMode is the GET counterpart of the IMC_SETCONVERSIONMODE
-	// (0x0002) that immdev.h documents. It carries no pointer, so sending it into
-	// another process is safe, and the timeout keeps a wedged target from stalling
-	// the message loop.
-	DWORD_PTR conversion = 0;
-	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
-	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 150, &conversion) == 0) {
-		return g_lastImeWasChinese;
-	}
-
-	// IME_CMODE_NATIVE is the bit Chinese, Japanese and Korean IMEs set while they
-	// are in their native (non-alphanumeric) input mode; switching the IME to
-	// English clears it (the mode becomes plain 0x0, or 0x401 while Chinese).
-	g_lastImeWasChinese = (conversion & IME_CMODE_NATIVE) != 0;
-	return g_lastImeWasChinese;
-}
-
-// Records why the direct route was abandoned, once, so a log that appears here is
-// informative rather than one line per keypress.
-void NoteImeApiUnusable(const wchar_t* reason) {
-	static bool alreadyReported = false;
-	if (alreadyReported) {
-		return;
-	}
-	alreadyReported = true;
-	Log(L"IME API could not confirm a mode change (%s)", reason);
-}
-
-// What came of trying to set the IME's mode directly. The distinction matters: only
-// "nothing was sent" and "provably no effect" may be followed by the keystroke. If a
-// request went out and the outcome is unknown, injecting the hotkey on top could
-// toggle the mode a second time and leave the user exactly where they started.
-enum class ImeApiResult {
-	NotAttempted,  // nothing was sent, so the keystroke is the only option left
-	Applied,       // the IME confirmed the requested mode
-	NoEffect,      // the mode is provably still what it was; safe to inject the hotkey
-	Unknown,       // a request went out and the outcome cannot be established
-};
-
-// Asks the foreground thread's IME to switch conversion mode directly. Every failure
-// path is a real observation, which is what makes falling back honest rather than a
-// guess: no IME window for the thread, a layout that is not an IME, an unreadable
-// mode, a timed-out request, or a read-back that never shows the requested bit.
-ImeApiResult TrySwitchImeModeByApi(const HWND foreground) {
-	if (foreground == nullptr) {
-		NoteImeApiUnusable(L"no foreground window");
-		return ImeApiResult::NotAttempted;
-	}
-
-	// A conversion mode only exists on a layout that really is an input method.
-	const DWORD thread = GetWindowThreadProcessId(foreground, nullptr);
-	if (thread == 0) {
-		NoteImeApiUnusable(L"no foreground thread");
-		return ImeApiResult::NotAttempted;
-	}
-	if (ImmIsIME(GetKeyboardLayout(thread)) == FALSE) {
-		NoteImeApiUnusable(L"the foreground layout is not an IME");
-		return ImeApiResult::NotAttempted;
-	}
-
-	const HWND imeWnd = ImmGetDefaultIMEWnd(foreground);
-	if (imeWnd == nullptr) {
-		NoteImeApiUnusable(L"the foreground thread has no IME window");
-		return ImeApiResult::NotAttempted;
-	}
-
-	DWORD_PTR current = 0;
-	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
-	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, kImeApiTimeoutMs, &current) == 0) {
-		NoteImeApiUnusable(L"the current conversion mode could not be read");
-		return ImeApiResult::NotAttempted;
-	}
-
-	// Move only the native bit and leave full-width and other conversion flags alone.
-	// The target comes from the mode just read, not from our cached idea of it.
-	const bool wantChinese = (current & IME_CMODE_NATIVE) == 0;
-	const DWORD_PTR wanted = wantChinese
-	    ? (current | static_cast<DWORD_PTR>(IME_CMODE_NATIVE))
-	    : (current & ~static_cast<DWORD_PTR>(IME_CMODE_NATIVE));
-
-	DWORD_PTR ignored = 0;
-	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeSetConversionMode, wanted,
-	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, kImeApiTimeoutMs, &ignored) == 0) {
-		// The request was sent but never answered, so it may still land later.
-		NoteImeApiUnusable(L"the set request timed out");
-		return ImeApiResult::Unknown;
-	}
-
-	// Confirm it took. Several quick attempts, because an IME may apply the change on
-	// its own schedule.
-	DWORD_PTR observed = current;
-	bool readBack = false;
-	for (int attempt = 0; attempt < kImeApiVerifyAttempts; ++attempt) {
-		DWORD_PTR mode = 0;
-		if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
-		                        SMTO_ABORTIFHUNG | SMTO_BLOCK, kImeApiTimeoutMs, &mode) != 0) {
-			observed = mode;
-			readBack = true;
-			if (((mode & IME_CMODE_NATIVE) != 0) == wantChinese) {
-				g_lastImeWasChinese = wantChinese;
-				return ImeApiResult::Applied;
-			}
-		}
-		Sleep(kImeApiVerifyDelayMs);
-	}
-
-	if (readBack && observed == current) {
-		// Unchanged, so the IME ignored us and the hotkey is safe to send.
-		NoteImeApiUnusable(L"the IME ignored the requested mode");
-		return ImeApiResult::NoEffect;
-	}
-
-	NoteImeApiUnusable(L"the IME ended up somewhere unexpected");
-	return ImeApiResult::Unknown;
-}
-
-void ReleaseOverlay() {
-	DestroyArgbSurface(g_overlayBitmap, g_overlayMemDc, g_overlayBits);
-	g_overlayWidth = 0;
-	g_overlayHeight = 0;
-}
-
-// Draws the rounded badge into the ARGB surface. GDI+ rather than GDI for two
-// reasons: GDI leaves the alpha channel at zero, which would make the glyph
-// invisible once the surface is composited, and only GDI+ anti-aliases the corners.
-bool RenderOverlay(const int size, const int dpi) {
-	if (!g_gdiplusReady) {
-		return false;
-	}
-	if (g_overlayBitmap == nullptr || g_overlayWidth != size) {
-		ReleaseOverlay();
-		if (!CreateArgbSurface(size, size, g_overlayBitmap, g_overlayMemDc, g_overlayBits)) {
-			Log(L"overlay: could not create the %dx%d surface (%lu)", size, size, GetLastError());
-			return false;
-		}
-		g_overlayWidth = size;
-		g_overlayHeight = size;
-	}
-
-	Gdiplus::REAL radius = static_cast<Gdiplus::REAL>(MulDiv(kOverlayRadiusDip, dpi, 96));
-	const int textHeight = MulDiv(kOverlayTextDip, dpi, 96);
-	const Gdiplus::REAL surface = static_cast<Gdiplus::REAL>(g_overlayWidth);
-	if (radius > surface * 0.5f) {
-		radius = surface * 0.5f;
-	}
-	const COLORREF fill = g_overlayChinese ? kOverlayChineseColor : kOverlayEnglishColor;
-
-	// The shapes go through GDI+ so the corners are anti-aliased. Its destructor
-	// flushes before GDI draws over the same pixels below.
-	{
-		Gdiplus::Bitmap target(g_overlayWidth, g_overlayHeight, g_overlayWidth * 4,
-		                       PixelFormat32bppPARGB, static_cast<BYTE*>(g_overlayBits));
-		Gdiplus::Graphics canvas(&target);
-
-		// Start from a genuinely transparent surface, then blend the badge onto it.
-		canvas.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-		canvas.Clear(Gdiplus::Color(0, 0, 0, 0));
-		canvas.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
-		canvas.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-		canvas.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-
-		Gdiplus::GraphicsPath fillPath;
-		AddRoundedRectangle(fillPath, Gdiplus::RectF(0.0f, 0.0f, surface, surface), radius);
-		Gdiplus::SolidBrush fillBrush(
-		    Gdiplus::Color(255, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
-		canvas.FillPath(&fillBrush, &fillPath);
-	}
-
-	// The glyph goes through GDI rather than GDI+: building a Gdiplus::FontFamily
-	// makes GDI+ enumerate every installed font, which measured four seconds here and
-	// left the badge arriving far too late.
-	{
-		const HFONT font = CreateFontW(-textHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-		                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-		                               ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-		                               kOverlayFontFace);
-		const HGDIOBJ previous = SelectObject(
-		    g_overlayMemDc, font != nullptr ? font : GetStockObject(DEFAULT_GUI_FONT));
-		SetBkMode(g_overlayMemDc, TRANSPARENT);
-		SetTextColor(g_overlayMemDc, RGB(245, 245, 245));
-		RECT textArea = { 0, 0, g_overlayWidth, g_overlayHeight };
-		DrawTextW(g_overlayMemDc, g_overlayText, -1, &textArea,
-		          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-		SelectObject(g_overlayMemDc, previous);
-		if (font != nullptr) {
-			DeleteObject(font);
-		}
-	}
-
-	// Colour is on the surface; now give it the matching alpha, which also repairs
-	// whatever GDI did to the alpha bytes of the glyph.
-	GdiFlush();  // Complete queued GDI text writes before touching the DIB memory.
-	StampRoundedAlpha(size, radius);
-	return true;
-}
-
-void CreateOverlayWindow(const HINSTANCE instance) {
-	WNDCLASSEX wcex = {};
-	wcex.cbSize = sizeof(WNDCLASSEX);
-	wcex.lpfnWndProc = SurfaceProc;
-	wcex.hInstance = instance;
-	wcex.lpszClassName = kOverlayClass;
-	RegisterClassExW(&wcex);  // on failure there is simply no overlay
-
-	// Layered so the surface can carry per-pixel alpha; transparent and
-	// non-activating so it never takes a click or the focus away from whatever the
-	// user is typing into.
-	g_overlayWnd = CreateWindowExW(
-	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-	    kOverlayClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
-}
-
-void ShowImeStateOverlay() {
-	if (g_overlayWnd == nullptr || g_imeTarget != GetForegroundWindow()) {
-		return;
-	}
-
-	g_overlayChinese = ForegroundImeIsChinese();
-	wcscpy_s(g_overlayText, g_overlayChinese ? L"\u4E2D" : L"En");
-
-	const int dpi = ScreenDpi(GetForegroundWindow(), g_overlayWnd);
-	const int size = MulDiv(kOverlaySizeDip, dpi, 96);
-	if (!RenderOverlay(size, dpi)) {
-		return;
-	}
-
-	g_overlayAlpha = kOverlayAlpha;
-	if (!PushLayeredSurface(g_overlayWnd, g_overlayMemDc, g_overlayWidth, g_overlayHeight,
-	                        g_overlayAlpha, GetForegroundWindow())) {
-		Log(L"overlay: UpdateLayeredWindow failed (%lu)", GetLastError());
-		return;
-	}
-	ShowWindow(g_overlayWnd, SW_SHOWNA);
-
-	g_overlayHoldTicks = kOverlayHoldMs / kOverlayFadeStepMs;
-	SetTimer(g_hWnd, kTimerOverlayFade, kOverlayFadeStepMs, nullptr);
-}
-
-// Brings up the hook and the tray icon, and keeps retrying on a short timer while
-// either one is still missing. Neither failure is fatal any more: a startup entry
-// regularly runs before the shell is ready, so SetWindowsHookEx can succeed while
-// Shell_NotifyIcon fails, and the icon then has to be added a couple of seconds
-// later. Quitting at that point is what used to make the program appear to start
-// and vanish.
+// 挂上钩子和托盘图标，只要有一样还没成功，就用一个短定时器不断重试。
+// 这两件事失败都不再致命：开机自启时外壳常常还没准备好，SetWindowsHookEx
+// 能成功而 Shell_NotifyIcon 失败，图标得过几秒才补得上。
+// 以前正是在这里退出，才让人觉得程序一闪就没了。
 void EnsureInstalled(const HWND hwnd) {
 	const bool hookReady = InstallHook();
 	const bool trayReady = AddTrayIcon(hwnd);
-	// Read it here, before anything else gets a chance to overwrite it.
+	// 先在这里读出来，免得被后面任何调用覆盖掉。
 	const DWORD failureCode = GetLastError();
 
 	if (hookReady && trayReady) {
@@ -1219,8 +821,8 @@ void EnsureInstalled(const HWND hwnd) {
 		g_installTroubleLogged = true;
 		g_installTroubleTick = GetTickCount64();
 		wchar_t text[512] = {};
-		// This is the shape a startup entry sees at logon: the hook goes in fine
-		// while the shell is not ready to accept a tray icon yet.
+		// 登录时的自启项看到的就是这个样子：钩子挂得上，
+		// 但外壳还没准备好接受托盘图标。
 		Log(L"startup install incomplete: hook=%d tray=%d, retrying every %u ms",
 		    hookReady ? 1 : 0, trayReady ? 1 : 0, kRetryStartupMs);
 		Log(L"failure detail  : last error %lu (0x%08lX) %s",
@@ -1235,10 +837,9 @@ void ReinstallHook(const HWND hwnd) {
 	}
 }
 
-// Runs once a minute. Windows drops a low-level hook that times out without saying
-// so, and the shell drops tray icons whenever Explorer restarts, so both are
-// re-asserted here. Together with the fast retry loop and the TaskbarCreated
-// handler, this covers either start order between this program and the shell.
+// 每分钟跑一次。Windows 会不声不响地摘掉超时的低级钩子，外壳会在 Explorer
+// 重启时丢掉托盘图标，所以这里把两者都重新挂一遍。配合快速重试和
+// TaskbarCreated 处理，本程序和外壳不管谁先起来都能兜住。
 void SelfHeal(const HWND hwnd) {
 	const bool trayWasRegistered = g_trayIconAdded;
 
@@ -1246,9 +847,9 @@ void SelfHeal(const HWND hwnd) {
 	RefreshTrayIcon(hwnd);
 
 	if (!trayWasRegistered && g_trayIconAdded) {
-		// The shell had dropped our icon - typically an Explorer restart whose
-		// TaskbarCreated broadcast we missed. Worth a line, because from the user's
-		// side this is exactly "the tray icon disappeared".
+		// 外壳把我们的图标丢掉了——通常是 Explorer 重启、而它的 TaskbarCreated
+		// 广播我们没收到。这值得记一行日志，因为在用户看来这就是
+		// "托盘图标不见了"。
 		Log(L"tray icon was missing and has been re-registered on the self-heal tick");
 	}
 
@@ -1258,11 +859,11 @@ void SelfHeal(const HWND hwnd) {
 }
 
 // ---------------------------------------------------------------------------
-// Startup splash
+// 启动画面
 //
-// The keycap arrives as a PNG with real transparency, so it goes onto its own
-// premultiplied ARGB surface and is held and faded by re-pushing that surface with
-// a smaller constant alpha - no re-decoding and no repainting.
+// 键帽是一张带真实透明度的 PNG，所以先画到它自己的预乘 Alpha 位图上；
+// 之后停留和淡出都是把同一张位图按更小的整体透明度重新推一次——
+// 不重新解码，也不重新绘制。
 // ---------------------------------------------------------------------------
 
 void ReleaseSplash() {
@@ -1301,7 +902,7 @@ bool PrepareSplash() {
 		return false;
 	}
 
-	// GDI+ may read lazily: destroy the image before releasing its source stream.
+	// GDI+ 可能是惰性读取的，所以要在释放源数据流之前销毁图像。
 	const auto releaseStream = [](IStream* value) { value->Release(); };
 	const std::unique_ptr<IStream, decltype(releaseStream)> streamOwner(stream, releaseStream);
 	const std::unique_ptr<Gdiplus::Image> image(Gdiplus::Image::FromStream(stream));
@@ -1313,10 +914,9 @@ bool PrepareSplash() {
 		return false;
 	}
 
-	// The image's natural size counts as DIPs, so scale it by the display DPI: the
-	// splash keeps the apparent size it always had, but is rendered at the real
-	// pixel resolution instead of being stretched up to it. Fit the work area as
-	// well, and never enlarge past the DPI factor.
+	// 图片的原始尺寸按 DIP 算，所以用屏幕 DPI 缩放：启动画面看上去还是原来那么大，
+	// 但按真实像素分辨率渲染，而不是被拉伸上去。同时还要塞得进工作区，
+	// 而且放大倍数不超过 DPI 系数。
 	const int dpi = ScreenDpi(nullptr, g_splashWnd);
 	const RECT area = WorkAreaFor(nullptr);
 	const int maxHeight = MulDiv(area.bottom - area.top, kSplashMaxHeightPercent, 100);
@@ -1333,8 +933,8 @@ bool PrepareSplash() {
 	}
 
 	{
-		// Drawing into a PARGB bitmap makes GDI+ premultiply as it writes, which is
-		// exactly the format UpdateLayeredWindow wants.
+		// 往 PARGB 位图上绘制时，GDI+ 会边写边做预乘——
+		// 这正是 UpdateLayeredWindow 要的格式。
 		Gdiplus::Bitmap target(width, height, width * 4, PixelFormat32bppPARGB,
 		                       static_cast<BYTE*>(g_splashBits));
 		Gdiplus::Graphics canvas(&target);
@@ -1375,9 +975,9 @@ void ShowSplash() {
 	if (!ApplySplashAlpha()) {
 		return;
 	}
-	ShowWindow(g_splashWnd, SW_SHOWNA);  // visible, but never taking the focus
-	// Driving the fade from elapsed time keeps the hold and the fade to the lengths
-	// asked for, whatever jitter the timer has.
+	ShowWindow(g_splashWnd, SW_SHOWNA);  // 可见，但绝不抢焦点
+	// 用实际流逝的时间驱动淡出，定时器再怎么抖动，停留和淡出
+	// 也还是要求的那么长。
 	g_splashFadeStart = GetTickCount64() + kSplashHoldMs;
 	SetTimer(g_hWnd, kTimerSplashFade, kSplashTickMs, nullptr);
 }
@@ -1410,8 +1010,8 @@ void ShowContextMenu(const HWND hwnd) {
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0,
 	            L"Alt+CapsLock = \u539F\u6765\u7684 CapsLock");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-	// Both ticks are rebuilt every time the menu opens, so the menu can never
-	// disagree with the actual state.
+	// 每次打开菜单都会重新生成这两个勾选状态，
+	// 所以菜单永远不会和真实状态不一致。
 	AppendMenuW(hMenu, MF_STRING | (g_enabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdToggleMapping,
 	            L"\u542F\u7528\u6620\u5C04 (CapsLock -> Ctrl+Space)");
 	AppendMenuW(hMenu, MF_STRING | (g_startupTaskInstalled ? MF_CHECKED : MF_UNCHECKED),
@@ -1423,8 +1023,8 @@ void ShowContextMenu(const HWND hwnd) {
 
 	const UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
 
-	// Documented requirement after TrackPopupMenu, otherwise the menu can stay
-	// stuck on screen until the user clicks somewhere else.
+	// TrackPopupMenu 之后文档要求这么做，否则菜单可能一直卡在屏幕上，
+	// 直到用户点到别处才消失。
 	PostMessageW(hwnd, WM_NULL, 0, 0);
 	DestroyMenu(hMenu);
 
@@ -1440,14 +1040,13 @@ void ShowContextMenu(const HWND hwnd) {
 LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) {
 	switch (message) {
 	case WM_CREATE:
-		g_hWnd = hwnd;  // the hook callback posts to this window
-		CreateOverlayWindow(g_hInst);
+		g_hWnd = hwnd;  // 钩子回调往这个窗口投消息
 		CreateSplashWindow(g_hInst);
 		EnsureInstalled(hwnd);
 		SetTimer(hwnd, kTimerSelfHeal, kSelfHealMs, nullptr);
 
-		// Ask once whether the logon task is there; the answer is what the menu
-		// shows as the tick next to "start at logon".
+		// 启动时问一次登录任务在不在，这个答案就是菜单里
+		// "开机启动"旁边那个勾。
 		g_startupTaskInstalled = QueryStartupTask();
 
 		if (g_gdiplusReady && PrepareSplash()) {
@@ -1460,29 +1059,6 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 			EnsureInstalled(hwnd);
 		} else if (wParam == kTimerSelfHeal) {
 			SelfHeal(hwnd);
-		} else if (wParam == kTimerShowImeState) {
-			// One-shot: the interval only existed to let the injected hotkey land.
-			KillTimer(hwnd, kTimerShowImeState);
-			if (g_imeTarget == GetForegroundWindow()) {
-				ShowImeStateOverlay();
-			}
-		} else if (wParam == kTimerOverlayFade) {
-			if (g_overlayHoldTicks > 0) {
-				--g_overlayHoldTicks;
-			} else {
-				g_overlayAlpha -= kOverlayFadeStep;
-				if (g_overlayAlpha <= 0) {
-					KillTimer(hwnd, kTimerOverlayFade);
-					if (g_overlayWnd != nullptr) {
-						ShowWindow(g_overlayWnd, SW_HIDE);
-					}
-				} else if (g_overlayWnd != nullptr) {
-					// Re-push the same surface with a smaller constant alpha; the
-					// bitmap itself does not change.
-					PushLayeredSurface(g_overlayWnd, g_overlayMemDc, g_overlayWidth,
-					                   g_overlayHeight, g_overlayAlpha, GetForegroundWindow());
-				}
-			}
 		} else if (wParam == kTimerSplashFade) {
 			const ULONGLONG now = GetTickCount64();
 			if (now >= g_splashFadeStart + kSplashFadeMs) {
@@ -1497,46 +1073,21 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 				                static_cast<int>(kSplashAlphaMax * elapsed / kSplashFadeMs);
 				ApplySplashAlpha();
 			}
-			// otherwise the hold is still running, so there is nothing to do
+			// 否则就是还在停留阶段，什么都不用做
 		} else if (wParam == kTimerRefreshStartup) {
-			// A moment has passed since asking for the change, so pick up what the
-			// elevated helper did.
+			// 距离上次请求改动已经过了一小会儿，
+			// 把提权副本干出来的结果取回来。
 			KillTimer(hwnd, kTimerRefreshStartup);
 			g_startupTaskInstalled = QueryStartupTask();
 		}
 		break;
 
 	case WM_SWITCH_IME:
-		g_imeTarget = reinterpret_cast<HWND>(wParam);
-		if (!g_enabled || g_imeTarget == nullptr || g_imeTarget != GetForegroundWindow()) {
-			break;
+		// 钩子在 CapsLock 按下时就记下了前台窗口：如果用户之后换了窗口，
+		// 这条请求就已经过期了。
+		if (g_enabled && reinterpret_cast<HWND>(wParam) == GetForegroundWindow()) {
+			SendCtrlSpace();
 		}
-		KillTimer(hwnd, kTimerShowImeState);
-		// Preferred route: flip the IME's own state through its window. It takes effect
-		// at once and cannot be swallowed by another hook, but it is only believed when
-		// the IME confirms the change.
-		if (kPreferImeApi) {
-			const ImeApiResult result = TrySwitchImeModeByApi(g_imeTarget);
-			if (result == ImeApiResult::Applied) {
-				ShowImeStateOverlay();  // already the truth: the mode was confirmed
-				break;
-			}
-			if (result == ImeApiResult::Unknown) {
-				// A request went out and its effect cannot be established. Sending the
-				// hotkey now could toggle a second time and land the user back where
-				// they started, so report the state instead of gambling on it.
-				ShowImeStateOverlay();
-				break;
-			}
-			// NotAttempted or NoEffect: the keystroke is still the right move.
-		}
-
-		if (g_imeTarget != GetForegroundWindow() || !SendCtrlSpace()) {
-			break;
-		}
-		// Ask which mode the foreground IME ended up in a moment later, once the
-		// injected hotkey has actually been handled.
-		SetTimer(hwnd, kTimerShowImeState, kImeQueryDelayMs, nullptr);
 		break;
 
 	case WM_TRAYICON:
@@ -1548,20 +1099,13 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 	case WM_DESTROY:
 		KillTimer(hwnd, kTimerRetryStartup);
 		KillTimer(hwnd, kTimerSelfHeal);
-		KillTimer(hwnd, kTimerShowImeState);
-		KillTimer(hwnd, kTimerOverlayFade);
 		KillTimer(hwnd, kTimerSplashFade);
 		KillTimer(hwnd, kTimerRefreshStartup);
-		if (g_overlayWnd != nullptr) {
-			DestroyWindow(g_overlayWnd);
-			g_overlayWnd = nullptr;
-		}
 		if (g_splashWnd != nullptr) {
 			DestroyWindow(g_splashWnd);
 			g_splashWnd = nullptr;
 		}
 		ReleaseSplash();
-		ReleaseOverlay();
 		UninstallHook();
 		RemoveTrayIcon();
 		g_hWnd = nullptr;
@@ -1570,10 +1114,9 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 
 	default:
 		if (g_taskbarCreatedMessage != 0 && message == g_taskbarCreatedMessage) {
-			// Explorer restarted and took the tray icon with it. RefreshTrayIcon
-			// works out whether it really is gone: a broadcast we did not need must
-			// not make us forget an icon we still own, or it would never be removed
-			// on exit.
+			// Explorer 重启，托盘图标也跟着没了。RefreshTrayIcon 会自己判断
+			// 图标是不是真的不见了：一次用不上的广播不能让我们忘记自己
+			// 还持有的图标，否则退出时就再也不会去删它。
 			Log(L"Explorer restart seen (TaskbarCreated): re-registering the tray icon");
 			RefreshTrayIcon(hwnd);
 			if (!g_trayIconAdded) {
@@ -1582,7 +1125,7 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 			break;
 		}
 		if (g_showYourselfMessage != 0 && message == g_showYourselfMessage) {
-			// A second launch found us and asked us to make ourselves visible.
+			// 第二次启动找到了我们，让我们把自己的图标重新露出来。
 			RefreshTrayIcon(hwnd);
 			ShowBalloon(L"Already running - the tray icon has been restored.");
 			break;
@@ -1592,16 +1135,16 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 	return 0;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(nCmdShow);
 	UNREFERENCED_PARAMETER(lpCmdLine);
 
-	// The elevated helper must act before anything else: it has to stay clear of the
-	// running instance's single-instance mutex, and it never shows a window. These
-	// spellings must match kCommandStartupEnable / kCommandStartupDisable.
+	// 提权副本必须最先处理：它得避开正在运行的实例的互斥体，
+	// 而且绝不创建窗口。这里的字面量必须和 kCommandStartupEnable /
+	// kCommandStartupDisable 一致。
 	int argumentCount = 0;
 	wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
 	const bool enableStartup = arguments != nullptr && argumentCount == 2 &&
@@ -1616,8 +1159,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	g_startTick = GetTickCount64();
 	BuildPaths();
 
-	// Before any window or screen DC exists, so the whole process - badge, splash and
-	// the sizes derived from the DPI - works in real screen pixels.
+	// 要在任何窗口或屏幕 DC 出现之前调用，这样启动画面和由 DPI 算出的
+	// 尺寸都工作在真实的屏幕像素上。
 	EnableDpiAwareness();
 
 	Gdiplus::GdiplusStartupInput gdiplusInput;
@@ -1646,9 +1189,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		return 1;
 	}
 	if (hMutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
-		// Ask the instance that is already running to put its tray icon back: it
-		// may well be invisible after an Explorer restart, which is exactly when
-		// users believe the program died and reach for the shortcut again.
+		// 请求已经在运行的那个实例把托盘图标挂回去：Explorer 重启之后
+		// 它很可能就看不见了，而这正是用户以为程序死了、
+		// 又去点快捷方式的时候。
 		const HWND existing = FindWindowW(kWindowClass, kWindowTitle);
 		if (existing != nullptr && g_showYourselfMessage != 0) {
 			PostMessageW(existing, g_showYourselfMessage, 0, 0);
@@ -1678,8 +1221,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		return 1;
 	}
 
-	// WM_CREATE publishes g_hWnd before starting the hook thread. Do not write it
-	// again here while that thread may already be reading it.
+	// WM_CREATE 会在启动钩子线程之前就写好 g_hWnd。这里不要再写一遍，
+	// 因为那个线程可能已经在读它了。
 	const HWND mainWindow = CreateWindowEx(
 		0,
 		kWindowClass,
@@ -1708,15 +1251,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	MSG msg = {};
 	BOOL result = 0;
-	// GetMessage returns -1 on error, which is non-zero and would therefore look
-	// like success; the MSG would stay untouched and dispatching it would mean
-	// dispatching stale stack data. Check for it explicitly.
+	// 出错时 GetMessage 返回 -1，它非零、看起来和成功一样；而且 MSG 不会被写入，
+	// 直接派发就等于派发栈上的垃圾数据。所以这里显式检查 -1。
 	while ((result = GetMessageW(&msg, nullptr, 0, 0)) != 0) {
 		if (result == -1) {
-			// Read the error before anything else can overwrite it, then write down
-			// everything the process can still observe about the failure. The log is
-			// written while the hook and tray icon are still in place, so the record
-			// shows the state the program was actually in when it gave up.
+			// 先读错误码，免得被别的调用覆盖，然后把进程还能观察到的失败细节
+			// 全部记下来。写日志时钩子和托盘图标都还在，
+			// 所以记录反映的是程序放弃时真实所处的状态。
 			const DWORD lastError = GetLastError();
 			LogMessageLoopFailure(lastError);
 			break;
@@ -1726,11 +1267,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	if (result == -1 && g_hWnd != nullptr) {
-		// Bailing out of the loop this way skips WM_DESTROY, and that is where the
-		// hook is unhooked. Leaving the hook installed would be worse than useless:
-		// it still swallows CapsLock, but the injection happens on the message
-		// loop, so CapsLock would go dead without sending anything. Tear the window
-		// down so WM_DESTROY runs and the hook and tray icon are released.
+		// 这样跳出循环会跳过 WM_DESTROY，而卸钩子正是在那里做的。留着钩子
+		// 比没有更糟：它仍然吞掉 CapsLock，可注入动作是在消息循环里做的，
+		// 于是 CapsLock 会彻底失效、什么都不发。所以要把窗口拆掉，
+		// 让 WM_DESTROY 跑一遍，释放钩子和托盘图标。
 		DestroyWindow(g_hWnd);
 	}
 

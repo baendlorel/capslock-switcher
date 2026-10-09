@@ -1,11 +1,11 @@
-// Microsoft Visual C++ generated resource script.
+// Microsoft Visual C++ 生成的资源脚本。
 //
 #include "resource.h"
 
 #define APSTUDIO_READONLY_SYMBOLS
 /////////////////////////////////////////////////////////////////////////////
 //
-// Generated from the TEXTINCLUDE 2 resource.
+// 由 TEXTINCLUDE 2 资源生成。
 //
 #include "winres.h"
 
@@ -47,14 +47,13 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 //
-// Icon
+// 图标
 //
 
-// Icon with lowest ID value placed first to ensure application icon
-// remains consistent on all systems.
+// 把 ID 最小的图标放在最前面，保证程序图标在所有系统上表现一致。
 IDI_MAINICON            ICON                    "app.ico"
 
-// Keycap PNG that greets the user for a moment when the program starts.
+// 键帽 PNG：程序启动时向用户打个招呼，停留片刻。
 IDR_SPLASH_IMAGE        RCDATA                  "umbral-keys.png"
 
 #endif    // 中文(简体，中国) resources
@@ -65,7 +64,7 @@ IDR_SPLASH_IMAGE        RCDATA                  "umbral-keys.png"
 #ifndef APSTUDIO_INVOKED
 /////////////////////////////////////////////////////////////////////////////
 //
-// Generated from the TEXTINCLUDE 3 resource.
+// 由 TEXTINCLUDE 3 资源生成。
 //
 
 

@@ -5,7 +5,7 @@
 #define IDI_ICON1                       101
 #define IDI_MAINICON                    101
 
-// Next default values for new objects
+// 新建对象的默认值
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
@@ -15,5 +15,5 @@
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
-// Splash image (embedded as RCDATA in the .rc)
+// 启动画面图片（在 .rc 里以 RCDATA 嵌入）
 #define IDR_SPLASH_IMAGE 102

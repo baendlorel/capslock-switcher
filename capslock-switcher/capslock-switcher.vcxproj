@@ -152,7 +152,7 @@
     <None Include="..\package.json" />
     <None Include="gen_version.mjs" />
   </ItemGroup>
-  <!-- Generate the version header before build (also works in paths with spaces). -->
+  <!-- 编译前生成版本号头文件（路径带空格也能正常工作）。 -->
   <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
     <Exec Command="node &quot;$(ProjectDir)gen_version.mjs&quot;" />
   </Target>
