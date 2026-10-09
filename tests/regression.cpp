@@ -43,6 +43,14 @@ static UINT WINAPI FakeSend(UINT count, LPINPUT inputs, int) {
     return sentBatches.size() == 1 && firstSendCount != UINT_MAX ? firstSendCount : count;
 }
 
+// 鼠标指针那几个会真动系统状态的 API 也换成替身。声明放在这里、定义放在
+// 各模块之后：替身要用 cursor.cpp 里的辅助函数去读回光标像素。
+static BOOL WINAPI FakeSetSystemCursor(HCURSOR cursor, DWORD id);
+static BOOL WINAPI FakeSystemParametersInfo(UINT action, UINT param, PVOID data, UINT winIni);
+static HWINEVENTHOOK WINAPI FakeSetWinEventHook(DWORD, DWORD, HMODULE, WINEVENTPROC, DWORD, DWORD,
+                                                DWORD);
+static BOOL WINAPI FakeUnhookWinEvent(HWINEVENTHOOK hook);
+
 // 键盘 API 换成替身，且必须在包含各模块之前定义。
 #define GetAsyncKeyState FakeKeyState
 #define GetForegroundWindow FakeForeground
@@ -51,10 +59,15 @@ static UINT WINAPI FakeSend(UINT count, LPINPUT inputs, int) {
 #define SendInput FakeSend
 #define SetWindowsHookExW FakeInstall
 #define UnhookWindowsHookEx FakeUnhook
+#define SetSystemCursor FakeSetSystemCursor
+#define SystemParametersInfoW FakeSystemParametersInfo
+#define SetWinEventHook FakeSetWinEventHook
+#define UnhookWinEvent FakeUnhookWinEvent
 
 // 各模块的 .cpp 都编进这一个翻译单元，替身才对所有模块都生效。
 #include "../capslock-switcher/main.cpp"
 #include "../capslock-switcher/banner.cpp"
+#include "../capslock-switcher/cursor.cpp"
 #include "../capslock-switcher/keyboard.cpp"
 #include "../capslock-switcher/logging.cpp"
 #include "../capslock-switcher/settings.cpp"
@@ -70,6 +83,62 @@ static UINT WINAPI FakeSend(UINT count, LPINPUT inputs, int) {
 #undef SendInput
 #undef SetWindowsHookExW
 #undef UnhookWindowsHookEx
+#undef SetSystemCursor
+#undef SystemParametersInfoW
+#undef SetWinEventHook
+#undef UnhookWinEvent
+
+// —— 鼠标指针的替身 ——
+// 真 SetSystemCursor 会把传进来的句柄收走（自己销毁），替身也照做，
+// 顺带把光标像素读下来，好在测试里断言"喂进去的确实是目标颜色"。
+static unsigned setCursorCalls = 0;
+static DWORD lastCursorId = 0;
+static std::vector<DWORD> lastCursorPixels;
+static unsigned cursorReloads = 0;  // SPI_SETCURSORS 被调了几次
+static unsigned winEventHooks = 0;
+static unsigned winEventUnhooks = 0;
+
+static BOOL WINAPI FakeSetSystemCursor(HCURSOR cursor, DWORD id) {
+    ++setCursorCalls;
+    lastCursorId = id;
+    lastCursorPixels.clear();
+    ICONINFO info = {};
+    if (cursor != nullptr && GetIconInfo(cursor, &info)) {
+        CursorSource source;
+        if (ReadColorPixels(info.hbmColor, source)) {
+            lastCursorPixels = source.pixels;
+        }
+        DeleteObject(info.hbmColor);
+        DeleteObject(info.hbmMask);
+    }
+    if (cursor != nullptr) {
+        DestroyCursor(cursor);
+    }
+    return TRUE;
+}
+
+// SPI_SETCURSORS 拦下来计数，别的（比如 surface.cpp 要用的 SPI_GETWORKAREA）转给真函数。
+static BOOL WINAPI FakeSystemParametersInfo(UINT action, UINT param, PVOID data, UINT winIni) {
+    if (action == SPI_SETCURSORS) {
+        ++cursorReloads;
+        return TRUE;
+    }
+    using RealFn = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT);
+    static const auto real = reinterpret_cast<RealFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SystemParametersInfoW"));
+    return real != nullptr ? real(action, param, data, winIni) : FALSE;
+}
+
+static HWINEVENTHOOK WINAPI FakeSetWinEventHook(DWORD, DWORD, HMODULE, WINEVENTPROC, DWORD, DWORD,
+                                                DWORD) {
+    ++winEventHooks;
+    return reinterpret_cast<HWINEVENTHOOK>(1);
+}
+
+static BOOL WINAPI FakeUnhookWinEvent(HWINEVENTHOOK) {
+    ++winEventUnhooks;
+    return TRUE;
+}
 
 static void Check(bool condition, const char* description) {
     if (!condition) {
@@ -263,10 +332,124 @@ static void TestHookThread() {
     std::puts("PASS: hook thread isolation, renewal and repeated shutdown (mock hooks)");
 }
 
+// COLORREF 是 0x00BBGGRR，光标像素是 0xAARRGGBB，别弄混。
+static DWORD Argb(const COLORREF color) {
+    return 0xFF000000 | (static_cast<DWORD>(GetRValue(color)) << 16) |
+           (static_cast<DWORD>(GetGValue(color)) << 8) | GetBValue(color);
+}
+
+// 这批像素看起来是不是染成了目标色：不透明像素里过半正好是那个色。
+static bool LooksTinted(const std::vector<DWORD>& pixels, const COLORREF color) {
+    if (pixels.empty()) {
+        return false;
+    }
+    const DWORD wanted = Argb(color);
+    int opaque = 0;
+    int hits = 0;
+    for (const DWORD px : pixels) {
+        if ((px >> 24) < 200) {
+            continue;
+        }
+        ++opaque;
+        if (px == wanted) {
+            ++hits;
+        }
+    }
+    return opaque > 0 && hits * 2 > opaque;
+}
+
+// 鼠标指针：先是颜色公式这个纯函数，再把整条路（解码系统光标 → 上色 → 还原）
+// 用替身走一遍，确认喂给 SetSystemCursor 的确实是目标颜色。
+static void TestCursor() {
+    DWORD light[4] = { 0xFFFFFFFF, 0xFF000000, 0x00FFFFFF, 0xFF808080 };
+    TintPixels(light, 4, kChineseColor, false);
+    Check(light[0] == Argb(kChineseColor), "a light body takes the tint colour");
+    Check(light[1] == 0xFF000000, "the black outline of a light body stays black");
+    Check((light[2] >> 24) == 0, "transparent pixels stay transparent");
+    Check((light[3] >> 24) == 0xFF && ((light[3] >> 16) & 0xFF) > (light[3] & 0xFF),
+          "half-lit pixels blend towards the tint");
+
+    DWORD dark[2] = { 0xFF000000, 0xFFFFFFFF };
+    TintPixels(dark, 2, kChineseColor, true);
+    Check(dark[0] == Argb(kChineseColor), "a dark body takes the tint colour");
+    Check(dark[1] == 0xFFFFFFFF, "the white outline of a dark body stays white");
+
+    // 热点必须原样带过去：I 型的热点不在角上，丢了点击落点就不准。
+    CursorSource sample;
+    sample.width = 4;
+    sample.height = 4;
+    sample.xHotspot = 2;
+    sample.yHotspot = 3;
+    sample.pixels.assign(16, 0xFF000000);
+    const HCURSOR packed = PackCursor(sample, sample.pixels);
+    ICONINFO packedInfo = {};
+    Check(packed != nullptr && GetIconInfo(packed, &packedInfo) != FALSE,
+          "a packed cursor can be read back");
+    Check(packedInfo.xHotspot == 2 && packedInfo.yHotspot == 3, "the hotspot survives packing");
+    DeleteObject(packedInfo.hbmColor);
+    DeleteObject(packedInfo.hbmMask);
+    if (packed != nullptr) {
+        DestroyCursor(packed);
+    }
+
+    // 真光标长什么样取决于系统（DPI 缩放、用户方案、甚至上一次运行留下的颜色），
+    // 所以解码那条路只查"读得出来"，颜色检查换成一组合成光源来做。
+    CursorSource decoded;
+    Check(DecodeCursor(32512, decoded) && decoded.width > 0 && decoded.height > 0,
+          "the system arrow cursor decodes to something");
+
+    InitializeCursorTint();
+    Check(winEventHooks == 1, "a foreground hook is registered at startup");
+    Check(setCursorCalls == std::size(kCursorIds), "every cursor slot is tinted at startup");
+
+    for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+        g_sources[i] = CursorSource{};
+        g_sources[i].width = 4;
+        g_sources[i].height = 4;
+        g_sources[i].xHotspot = 1;
+        g_sources[i].yHotspot = 1;
+        g_sources[i].darkInk = false;
+        g_sources[i].ready = true;
+        g_sources[i].pixels.assign(16, 0xFFFFFFFF);  // 白体，上色后应该正好是目标色
+    }
+
+    setCursorCalls = 0;
+    ApplyTint(true);
+    Check(setCursorCalls == std::size(kCursorIds), "switching to Chinese repaints every slot");
+    Check(LooksTinted(lastCursorPixels, kChineseColor), "the slots now hold the Chinese colour");
+
+    setCursorCalls = 0;
+    ApplyTint(true);
+    Check(setCursorCalls == 0, "the same state does not repaint");
+
+    setCursorCalls = 0;
+    ApplyTint(false);
+    Check(setCursorCalls == std::size(kCursorIds) && LooksTinted(lastCursorPixels, kEnglishColor),
+          "switching back repaints in the English colour");
+
+    const unsigned reloadsBefore = cursorReloads;
+    SetCursorTintEnabled(false);
+    Check(cursorReloads == reloadsBefore + 1, "turning the switch off reloads the user's cursors");
+    Check(g_applied == Tint::None, "nothing stays applied after turning it off");
+    setCursorCalls = 0;
+    ApplyTint(true);
+    Check(setCursorCalls == 0, "a disabled switch never touches the system cursors");
+
+    SetCursorTintEnabled(true);
+    Check(setCursorCalls == std::size(kCursorIds), "turning it back on tints right away");
+
+    DestroyCursorTint();
+    DestroyCursorTint();
+    Check(winEventUnhooks == 1, "shutting down twice releases the hook exactly once");
+    Check(g_applied == Tint::None, "shutdown does not leave a tint behind");
+    std::puts("PASS: cursor tint colour rule, hotspot round trip, state machine, shutdown");
+}
+
 int main() {
     TestKeyboard();
     TestHookThread();
     TestRendering();
+    TestCursor();
     std::puts("All regression checks passed.");
     return 0;
 }

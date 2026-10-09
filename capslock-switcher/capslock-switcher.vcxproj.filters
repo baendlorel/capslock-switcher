@@ -24,6 +24,9 @@
     <ClCompile Include="banner.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="cursor.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="keyboard.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -54,6 +57,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="banner.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="cursor.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="keyboard.h">

@@ -8,6 +8,10 @@
 
 constexpr wchar_t kAppTitle[] = L"CapsLock Switcher";
 
+// 中英文状态色：中央横幅和鼠标指针共用同一份，两边的颜色必须一致。
+constexpr COLORREF kChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
+constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
+
 extern HINSTANCE g_hInst;
 extern HWND g_mainWnd;  // 隐藏的主窗口：钩子消息和定时器都投给它
 
@@ -22,6 +26,10 @@ extern bool g_startupTaskInstalled;
 // Alt+CapsLock 和 CapsLock 一样，照样切换输入法。
 extern std::atomic_bool g_altPassThrough;
 
+// 鼠标指针跟着中英文状态变色（中文红、英文蓝）。默认开——用这个程序就是为了
+// 一眼看出当前是中文还是英文。关掉会立刻把系统光标还原。
+extern std::atomic_bool g_cursorTintEnabled;
+
 // 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，不要占用。
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
@@ -34,6 +42,8 @@ constexpr UINT WM_CAPS_LOCK_PASSED = WM_APP + 4;
 constexpr UINT_PTR kTimerRetryStartup = 1;
 constexpr UINT_PTR kTimerSelfHeal = 2;
 constexpr UINT_PTR kTimerRefreshStartup = 3;
+constexpr UINT_PTR kTimerCursorSettle = 4;  // 前台窗口变化后的去抖（见 cursor.cpp）
+constexpr UINT_PTR kTimerCursorPoll = 5;    // 兜底轮询同窗口内切换输入法的情况
 
 constexpr UINT kRetryStartupMs = 2000;
 constexpr UINT kStartupRefreshDelayMs = 3000;
@@ -41,3 +51,4 @@ constexpr UINT kStartupRefreshDelayMs = 3000;
 void SetMappingEnabled(bool enabled);  // tray.cpp
 void SetStartupEnabled(bool enable);   // startup.cpp
 void SetAltCapsLockEnabled(bool enabled);  // tray.cpp
+void SetCursorTintEnabled(bool enabled);   // cursor.cpp

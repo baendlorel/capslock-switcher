@@ -19,6 +19,7 @@ constexpr int kIdChkMapping = 101;
 constexpr int kIdChkAlt = 102;
 constexpr int kIdChkStartup = 103;
 constexpr int kIdOpenLog = 104;
+constexpr int kIdChkCursor = 105;
 
 constexpr UINT_PTR kTimerRefresh = 1;
 constexpr UINT kRefreshMs = 1000;
@@ -34,6 +35,7 @@ constexpr ULONGLONG kStartupPendingMs = 20000;
 HWND g_wnd = nullptr;
 HWND g_chkMapping = nullptr;
 HWND g_chkAlt = nullptr;
+HWND g_chkCursor = nullptr;
 HWND g_chkStartup = nullptr;
 HWND g_btnOpenLog = nullptr;
 HWND g_logView = nullptr;
@@ -155,6 +157,10 @@ void CreateControls(const HWND wnd) {
 	    0, L"BUTTON", L"Alt+CapsLock = 原来的大写锁定",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkAlt)), g_hInst, nullptr);
+	g_chkCursor = CreateWindowExW(
+	    0, L"BUTTON", L"鼠标指针跟着变色 (中文红 / 英文蓝)",
+	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
+	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkCursor)), g_hInst, nullptr);
 	g_chkStartup = CreateWindowExW(
 	    0, L"BUTTON", L"开机启动 (管理员)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
@@ -189,6 +195,8 @@ void LayoutChildren(const HWND wnd) {
 	y += row;
 	MoveWindow(g_chkAlt, margin, y, inner, row, TRUE);
 	y += row;
+	MoveWindow(g_chkCursor, margin, y, inner, row, TRUE);
+	y += row;
 	MoveWindow(g_chkStartup, margin, y, inner, row, TRUE);
 	y += row + gap;
 	MoveWindow(g_btnOpenLog, margin, y, buttonW, buttonH, TRUE);
@@ -196,7 +204,7 @@ void LayoutChildren(const HWND wnd) {
 	MoveWindow(g_logView, margin, y, inner, client.bottom - margin - y, TRUE);
 }
 
-// 把两个勾选同步成真实状态。BM_SETCHECK 不发通知，所以不会和用户的点击打架。
+// 把勾选同步成真实状态。BM_SETCHECK 不发通知，所以不会和用户的点击打架。
 void SyncControls() {
 	if (g_chkMapping != nullptr) {
 		SendMessageW(g_chkMapping, BM_SETCHECK, g_enabled.load() ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -204,6 +212,10 @@ void SyncControls() {
 	if (g_chkAlt != nullptr) {
 		SendMessageW(g_chkAlt, BM_SETCHECK,
 		             g_altPassThrough.load() ? BST_CHECKED : BST_UNCHECKED, 0);
+	}
+	if (g_chkCursor != nullptr) {
+		SendMessageW(g_chkCursor, BM_SETCHECK,
+		             g_cursorTintEnabled.load() ? BST_CHECKED : BST_UNCHECKED, 0);
 	}
 	if (g_chkStartup == nullptr) {
 		return;
@@ -300,6 +312,9 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 			return 0;
 		case kIdChkAlt:
 			SetAltCapsLockEnabled(SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED);
+			return 0;
+		case kIdChkCursor:
+			SetCursorTintEnabled(SendMessageW(g_chkCursor, BM_GETCHECK, 0, 0) == BST_CHECKED);
 			return 0;
 		case kIdChkStartup:
 			g_startupPending = true;

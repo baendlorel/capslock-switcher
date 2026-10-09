@@ -25,9 +25,7 @@ constexpr UINT_PTR kTimerSwitchSettle = 2;
 // 注入的 Ctrl+Space 要先被目标窗口处理掉，不然读到的还是切换前的旧状态。
 constexpr UINT kSwitchSettleMs = 50;
 
-// 中文红底、英文蓝底、大写锁定紫底，文字都是白的。
-constexpr COLORREF kChineseColor = RGB(0xFF, 0x1F, 0x45);   // #FF1F45
-constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);   // #0073FF
+// 中文红底、英文蓝底（这两个跟鼠标指针共用，在 app.h 里）、大写锁定紫底，文字都是白的。
 constexpr COLORREF kCapsLockColor = RGB(0x93, 0x33, 0xEA);       // #9333EA
 // 小写用淡一半的紫（就是上面那个紫往白里兑 50%），一眼能和大写区分开。
 constexpr COLORREF kCapsLockLowerColor = RGB(0xC9, 0x99, 0xF4);  // #C999F4
@@ -76,25 +74,6 @@ HWND DefaultImeWindow(const HWND foreground) {
 	HWND found = nullptr;
 	EnumThreadWindows(thread, FindImeWindow, reinterpret_cast<LPARAM>(&found));
 	return found;
-}
-
-// 前台线程的输入法是不是停在中文（native）模式。
-bool CurrentInputIsChinese() {
-	const HWND foreground = GetForegroundWindow();
-	if (foreground == nullptr) {
-		return g_lastKnownChinese;
-	}
-	const HWND imeWnd = DefaultImeWindow(foreground);
-	if (imeWnd == nullptr) {
-		return g_lastKnownChinese;
-	}
-	DWORD_PTR mode = 0;
-	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
-	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &mode) == 0) {
-		return g_lastKnownChinese;
-	}
-	g_lastKnownChinese = (mode & kImeCmodeNative) != 0;
-	return g_lastKnownChinese;
 }
 
 // 这次横幅该用什么底色。
@@ -287,6 +266,26 @@ LRESULT CALLBACK BannerProc(const HWND hwnd, const UINT message, const WPARAM wP
 }
 
 }  // 匿名命名空间
+
+// 前台线程的输入法是不是停在中文（native）模式。放在匿名命名空间外面：
+// 鼠标指针那边（cursor.cpp）要用同一个判断，不能各读各的。
+bool CurrentInputIsChinese(const DWORD timeoutMs) {
+	const HWND foreground = GetForegroundWindow();
+	if (foreground == nullptr) {
+		return g_lastKnownChinese;
+	}
+	const HWND imeWnd = DefaultImeWindow(foreground);
+	if (imeWnd == nullptr) {
+		return g_lastKnownChinese;
+	}
+	DWORD_PTR mode = 0;
+	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
+	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, timeoutMs, &mode) == 0) {
+		return g_lastKnownChinese;
+	}
+	g_lastKnownChinese = (mode & kImeCmodeNative) != 0;
+	return g_lastKnownChinese;
+}
 
 void CreateBannerWindow(const HINSTANCE instance) {
 	WNDCLASSEX wcex = {};

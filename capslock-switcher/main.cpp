@@ -4,6 +4,7 @@
 // 具体功能各自成模块：
 //   keyboard.cpp  键盘钩子与按键注入
 //   banner.cpp    切换提示横幅（屏幕中央闪一下中/英文）
+//   cursor.cpp    鼠标指针跟着中英文变色
 //   tray.cpp      托盘图标与右键菜单
 //   startup.cpp   开机启动（计划任务 + 提权副本）
 //   splash.cpp    启动画面
@@ -14,6 +15,7 @@
 #include "app.h"
 
 #include "banner.h"
+#include "cursor.h"
 #include "keyboard.h"
 #include "logging.h"
 #include "settings.h"
@@ -37,6 +39,9 @@ bool g_startupTaskInstalled = false;
 
 // Alt+CapsLock 放行给原来的大写锁定（默认开）。
 std::atomic_bool g_altPassThrough{ true };
+
+// 鼠标指针跟着中英文变色（默认开）。
+std::atomic_bool g_cursorTintEnabled{ true };
 
 namespace {
 
@@ -156,6 +161,8 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		if (StartGdiplus() && PrepareSplash()) {
 			ShowSplash();
 		}
+
+		InitializeCursorTint();
 		break;
 
 	case WM_TIMER:
@@ -163,6 +170,10 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 			EnsureInstalled(hwnd);
 		} else if (wParam == kTimerSelfHeal) {
 			SelfHeal(hwnd);
+		} else if (wParam == kTimerCursorSettle) {
+			CursorSettleTick();
+		} else if (wParam == kTimerCursorPoll) {
+			CursorPollTick();
 		} else if (wParam == kTimerRefreshStartup) {
 			// 距离上次请求改动已经过了一小会儿，
 			// 把提权副本干出来的结果取回来。
@@ -179,6 +190,8 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 			Log(SendCtrlSpace() ? L"CapsLock -> Ctrl+Space：切换输入法"
 			                    : L"CapsLock -> Ctrl+Space：注入失败，这次没切");
 			ShowSwitchBanner();
+			// 指针和横幅看同一个状态，但各走各的去抖：横幅窗口创建失败也不该拖累指针。
+			CursorSwitchSettle();
 		}
 		break;
 
@@ -208,6 +221,8 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		KillTimer(hwnd, kTimerRetryStartup);
 		KillTimer(hwnd, kTimerSelfHeal);
 		KillTimer(hwnd, kTimerRefreshStartup);
+		// 还原系统光标要趁早：后面的清理就算出了岔子，也不能让它拦住这一步。
+		DestroyCursorTint();
 		DestroySettingsWindow();
 		DestroySplashWindow();
 		DestroyBannerWindow();
@@ -233,6 +248,12 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 			// 第二次启动找到了我们，让我们把自己的图标重新露出来。
 			RefreshTrayIcon(hwnd);
 			ShowBalloon(L"Already running - the tray icon has been restored.");
+			break;
+		}
+		if (message == WM_SETTINGCHANGE &&
+		    (wParam == SPI_SETCURSORS || wParam == SPI_SETHIGHCONTRAST)) {
+			// 用户在鼠标设置里换了指针方案/大小，或者开关了高对比度。
+			OnSystemCursorsChanged();
 			break;
 		}
 		return DefWindowProcW(hwnd, message, wParam, lParam);

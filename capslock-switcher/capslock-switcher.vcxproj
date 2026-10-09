@@ -85,6 +85,8 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- 静态链接 CRT：exe 不再依赖 MSVCP140D.dll 等运行库，拷到哪台机器都能直接跑。 -->
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -100,6 +102,8 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- 静态链接 CRT：exe 不再依赖 MSVCP140.dll / VCRUNTIME140.dll，拷到哪台机器都能直接跑。 -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -113,6 +117,8 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- 静态链接 CRT：exe 不再依赖 MSVCP140D.dll 等运行库，拷到哪台机器都能直接跑。 -->
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -128,6 +134,8 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- 静态链接 CRT：exe 不再依赖 MSVCP140.dll / VCRUNTIME140.dll，拷到哪台机器都能直接跑。 -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -139,6 +147,7 @@
     <ClInclude Include="version.h" />
     <ClInclude Include="app.h" />
     <ClInclude Include="banner.h" />
+    <ClInclude Include="cursor.h" />
     <ClInclude Include="keyboard.h" />
     <ClInclude Include="logging.h" />
     <ClInclude Include="settings.h" />
@@ -150,6 +159,7 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="banner.cpp" />
+    <ClCompile Include="cursor.cpp" />
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="logging.cpp" />
     <ClCompile Include="settings.cpp" />
