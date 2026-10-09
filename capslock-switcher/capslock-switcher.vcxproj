@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -137,9 +137,26 @@
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="version.h" />
+    <ClInclude Include="app.h" />
+    <ClInclude Include="banner.h" />
+    <ClInclude Include="keyboard.h" />
+    <ClInclude Include="logging.h" />
+    <ClInclude Include="settings.h" />
+    <ClInclude Include="splash.h" />
+    <ClInclude Include="startup.h" />
+    <ClInclude Include="surface.h" />
+    <ClInclude Include="tray.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="banner.cpp" />
+    <ClCompile Include="keyboard.cpp" />
+    <ClCompile Include="logging.cpp" />
+    <ClCompile Include="settings.cpp" />
+    <ClCompile Include="splash.cpp" />
+    <ClCompile Include="startup.cpp" />
+    <ClCompile Include="surface.cpp" />
+    <ClCompile Include="tray.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="app.ico" />

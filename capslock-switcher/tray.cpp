@@ -1,0 +1,144 @@
+﻿#include "tray.h"
+
+#include "app.h"
+#include "logging.h"
+#include "resource.h"
+#include "settings.h"
+#include "version.h"
+
+#include <cstdio>
+
+bool g_trayIconAdded = false;
+
+namespace {
+
+// 悬停提示：不打开菜单也能看出映射开着还是关着。
+constexpr wchar_t kTooltipOn[] = L"CapsLock Switcher - \u5DF2\u542F\u7528";
+constexpr wchar_t kTooltipOff[] = L"CapsLock Switcher - \u5DF2\u7981\u7528";
+
+// 托盘菜单命令 ID。
+constexpr UINT kMenuIdSettings = 1;
+constexpr UINT kMenuIdToggleMapping = 2;
+constexpr UINT kMenuIdToggleStartup = 3;
+constexpr UINT kMenuIdExit = 4;
+
+NOTIFYICONDATA g_nid = {};
+
+void FillTrayData(const HWND hwnd) {
+	g_nid.cbSize = sizeof(NOTIFYICONDATA);
+	g_nid.hWnd = hwnd;
+	g_nid.uID = 1;
+	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+	g_nid.uCallbackMessage = WM_TRAYICON;
+	if (g_nid.hIcon == nullptr) {
+		// 宁可退回到系统自带图标，也不给外壳传一个 NULL HICON。
+		g_nid.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_MAINICON));
+		if (g_nid.hIcon == nullptr) {
+			g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+		}
+	}
+	wcscpy_s(g_nid.szTip, g_enabled ? kTooltipOn : kTooltipOff);
+}
+
+// 让悬停提示跟着开关走，不打开菜单也能看出状态。
+// 图标每次（重新）挂上时也会用到。
+void UpdateTrayTooltip() {
+	if (!g_trayIconAdded) {
+		return;
+	}
+	g_nid.uFlags = NIF_TIP;
+	wcscpy_s(g_nid.szTip, g_enabled ? kTooltipOn : kTooltipOff);
+	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+}  // 匿名命名空间
+
+bool AddTrayIcon(const HWND hwnd) {
+	if (g_trayIconAdded) {
+		return true;
+	}
+	FillTrayData(hwnd);
+	g_trayIconAdded = Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE;
+	return g_trayIconAdded;
+}
+
+// 就地刷新图标，外壳那边已经没有了就重新注册。先走 NIM_MODIFY 才能让
+// g_trayIconAdded 保持可信：对一个本来就在的图标，无条件 NIM_ADD 会失败，
+// 于是我们会误以为图标不在，退出时就永远不会去删它。
+void RefreshTrayIcon(const HWND hwnd) {
+	FillTrayData(hwnd);
+	if (!g_trayIconAdded || !Shell_NotifyIconW(NIM_MODIFY, &g_nid)) {
+		g_trayIconAdded = false;
+		AddTrayIcon(hwnd);
+	}
+}
+
+void RemoveTrayIcon() {
+	if (g_trayIconAdded) {
+		Shell_NotifyIconW(NIM_DELETE, &g_nid);
+		g_trayIconAdded = false;
+	}
+}
+
+void ShowBalloon(const wchar_t* text) {
+	if (!g_trayIconAdded) {
+		return;
+	}
+	g_nid.uFlags = NIF_INFO;
+	g_nid.dwInfoFlags = NIIF_INFO;
+	wcscpy_s(g_nid.szInfoTitle, kAppTitle);
+	wcscpy_s(g_nid.szInfo, text);
+	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+void SetMappingEnabled(const bool enabled) {
+	g_enabled = enabled;
+	UpdateTrayTooltip();
+	ShowBalloon(enabled ? L"CapsLock \u6620\u5C04\u5DF2\u542F\u7528"
+	                    : L"CapsLock \u6620\u5C04\u5DF2\u7981\u7528");
+}
+
+// 右键菜单。每次打开都重新生成勾选状态，所以菜单永远不会和真实状态不一致。
+void ShowTrayMenu(const HWND hwnd) {
+	POINT pt;
+	GetCursorPos(&pt);
+
+	HMENU hMenu = CreatePopupMenu();
+	if (hMenu == nullptr) {
+		return;
+	}
+
+	wchar_t versionText[64] = {};
+	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
+	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, versionText);
+	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0,
+	            L"Alt+CapsLock = \u539F\u6765\u7684 CapsLock");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hMenu, MF_STRING, kMenuIdSettings, L"\u8BBE\u7F6E...");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hMenu, MF_STRING | (g_enabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdToggleMapping,
+	            L"\u542F\u7528\u6620\u5C04 (CapsLock -> Ctrl+Space)");
+	AppendMenuW(hMenu, MF_STRING | (g_startupTaskInstalled ? MF_CHECKED : MF_UNCHECKED),
+	            kMenuIdToggleStartup, L"\u5F00\u673A\u542F\u52A8 (\u7BA1\u7406\u5458)");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hMenu, MF_STRING, kMenuIdExit, L"Exit");
+
+	SetForegroundWindow(hwnd);
+
+	const UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+
+	// TrackPopupMenu 之后文档要求这么做，否则菜单可能一直卡在屏幕上，
+	// 直到用户点到别处才消失。
+	PostMessageW(hwnd, WM_NULL, 0, 0);
+	DestroyMenu(hMenu);
+
+	if (cmd == kMenuIdSettings) {
+		OpenSettingsWindow();
+	} else if (cmd == kMenuIdToggleMapping) {
+		SetMappingEnabled(!g_enabled);
+	} else if (cmd == kMenuIdToggleStartup) {
+		SetStartupEnabled(!g_startupTaskInstalled);
+	} else if (cmd == kMenuIdExit) {
+		PostMessageW(hwnd, WM_CLOSE, 0, 0);
+	}
+}

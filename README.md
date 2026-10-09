@@ -13,6 +13,8 @@
 - ✅ 长时间运行自愈：键盘钩子失效后自动重装，Explorer重启后自动恢复托盘图标
 - ✅ 托盘图标创建失败时自动重试，不再直接退出
 - ✅ 托盘菜单可随时开启/关闭映射，菜单项带勾选状态
+- ✅ 每次切换在屏幕中央闪出当前输入法状态：中文红底"中文"，英文蓝底"English"
+- ✅ 双击托盘图标（或右键菜单里的"设置..."）打开设置页：上面是设置项，下面是实时日志
 - ✅ `Alt+CapsLock` 触发原本的大写锁定（同样受"启用映射"开关控制）
 - ✅ 托盘菜单可开关开机启动，以计划任务方式登录时自动运行且带管理员权限
 - ✅ 程序启动时在屏幕中央显示 `umbral-keys.png`，随后淡出
@@ -25,8 +27,16 @@
    或 `capslock-switcher\Debug`、`capslock-switcher\Release`（Win32）目录找到生成的exe文件
 3. 双击运行程序
 4. 程序会在系统托盘右下角显示图标
-5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），程序不会给出状态提示
-6. 右键点击托盘图标打开菜单：
+5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），切换后屏幕中央会闪出当前的输入法
+   状态：中文红底"中文"，英文蓝底"English"，约0.5秒后淡出。状态是从前台窗口所在线程的
+   IME 窗口读的，读不到就沿用上一次的结果，宁可显示旧值也不闪一个错的
+6. 右键点击托盘图标打开菜单；双击托盘图标则会直接打开设置页（菜单里也有"设置..."）。
+   设置页上方是设置项，下方是日志窗口（每秒自动刷新，显示最后 400 行）：
+   - `启用映射 (CapsLock -> Ctrl+Space)`、`开机启动 (管理员)`：和托盘菜单里的勾选项是同一份状态，
+     两边随时保持一致；设置页里改，托盘菜单里也会跟着变
+   - `打开日志文件`：用系统默认程序打开 `capslock-switcher.log`
+   - 关掉设置页（或按 Esc）只是收起来，程序继续在托盘里跑
+7. 右键菜单本身的内容：
    - `启用映射 (CapsLock -> Ctrl+Space)`：勾选/取消，用来临时开关映射。
      取消后CapsLock恢复成普通大写锁定键，程序本身仍在后台运行，随时可以再勾回来
    - `开机启动 (管理员)`：勾选/取消开机自动启动。勾选时会弹**一次** UAC 提权确认，
@@ -49,10 +59,21 @@
 
 ## 技术实现
 
+- 代码按职责拆成几个模块，各自一对 `.cpp/.h`：`main.cpp` 只管进程外壳（单实例、
+  隐藏主窗口、消息循环），键盘钩子在 `keyboard.cpp`，托盘在 `tray.cpp`，开机启动在
+  `startup.cpp`，启动画面在 `splash.cpp`，设置页在 `settings.cpp`，日志在 `logging.cpp`，
+  分层窗口和 DPI 辅助在 `surface.cpp`
 - 使用Windows低级键盘钩子（WH_KEYBOARD_LL）捕获CapsLock按键
-- 切换就是把 CapsLock 换成一次 `Ctrl+Space` 注入（`SendInput`）。程序不读也不改输入法
-  状态，所以不链接任何 IME 接口（没有 imm32）；注入不会松开用户仍按住的 Ctrl 或 Space，
-  半途失败时还会把已经按下的合成键补一个抬起，不留"卡住"的修饰键
+- 切换就是把 CapsLock 换成一次 `Ctrl+Space` 注入（`SendInput`）；注入不会松开用户仍按住的
+  Ctrl 或 Space，半途失败时还会把已经按下的合成键补一个抬起，不留"卡住"的修饰键。
+  改输入法状态的是被注入的那个快捷键，程序自己不去设置它
+- 屏幕中央的提示横幅要显示中文还是英文，读的是前台窗口所在线程的 IME 窗口：
+  `EnumThreadWindows` 按类名 `IME` 找到它（`ImmGetDefaultIMEWnd` 内部做的就是这件事），
+  再发 `WM_IME_CONTROL` + `IMC_GETCONVERSIONMODE`(0x0001)，用 `IME_CMODE_NATIVE` 位判断
+  中英文（中文模式实测为 0x401，英文为 0x0）。**全程没有链接 imm32**：消息本身在
+  `winuser.h` 里，那两个常量自己写一份就够了
+- 提示横幅在屏幕中央停留约 0.5 秒后淡出，中文红底 `#FF1F45`、英文蓝底 `#0073FF`，
+  圆角和逐像素 Alpha 的做法与启动画面相同（GDI+ 画形状、GDI 画字、最后补 Alpha 蒙版）
 - 钩子运行在独立线程，回调只在每次 CapsLock 首次按下时投递 `PostMessage`，
   由主线程执行 `SendInput`；长按不会反复切换，耗时操作也不会阻塞钩子线程。
   如果前台窗口已改变，则丢弃排队的切换请求
@@ -80,7 +101,8 @@
 BOM 是必需的：没有 BOM 的 UTF-8 源文件会被 MSVC 按系统代码页（中文系统是936）解释，
 一个多字节字符会连带吞掉字符串结尾的引号，直接编译不过（错误 C2001/C4819）。
 字符串里的中文仍然写成 `\uXXXX` 转义（例如 `\u542F\u7528` 就是"启用"），
-这样即使文件哪天被重新存成不带 BOM，也不会波及这些字面量。
+这样即使文件哪天被重新存成不带 BOM，也不会波及这些字面量；新写的代码（比如 `settings.cpp`）
+直接写中文即可，BOM 已经保证了正确性。
 
 ## 注意事项
 
@@ -112,12 +134,22 @@ BOM 是必需的：没有 BOM 的 UTF-8 源文件会被 MSVC 按系统代码页�
 
 回归检查可在 PowerShell 中运行 `./tests/run.ps1`。脚本自动加载 Visual Studio C++ 环境，
 验证按键配对、长按、修饰键、注入失败、钩子线程生命周期，以及启动图的解码与释放。
+各模块的 `.cpp` 会编进同一个翻译单元，键盘 API 换成替身，所以替身对所有模块都生效。
 测试使用模拟键盘 API，不会安装全局键盘钩子或向其他程序发送按键。
 
 ```
 capslock-switcher/
 ├── capslock-switcher/
-│   ├── main.cpp                    # 主程序源代码
+│   ├── main.cpp                    # 进程外壳：单实例、隐藏主窗口、消息循环
+│   ├── app.h                       # 共享状态与跨模块入口
+│   ├── keyboard.cpp / keyboard.h   # 键盘钩子与 Ctrl+Space 注入
+│   ├── banner.cpp / banner.h       # 切换提示横幅（屏幕中央的中/英文）
+│   ├── tray.cpp / tray.h           # 托盘图标与右键菜单
+│   ├── startup.cpp / startup.h     # 开机启动（计划任务 + 提权副本）
+│   ├── splash.cpp / splash.h       # 启动画面
+│   ├── settings.cpp / settings.h   # 设置页（设置项 + 日志）
+│   ├── logging.cpp / logging.h     # 诊断日志
+│   ├── surface.cpp / surface.h     # 分层窗口与 DPI 辅助
 │   ├── resource.h                  # 资源ID头文件
 │   ├── version.h                   # 由 gen_version.mjs 生成的版本号
 │   ├── gen_version.mjs             # 从 package.json 生成 version.h
@@ -126,6 +158,9 @@ capslock-switcher/
 │   ├── capslock-switcher.rc        # 资源脚本
 │   └── capslock-switcher.vcxproj   # 项目文件
 ├── capslock-switcher.slnx          # 解决方案
+├── tests/
+│   ├── regression.cpp              # 回归检查
+│   └── run.ps1                     # 跑回归检查（自动加载 VS C++ 环境）
 ├── package.json                    # 名称与版本号来源
 └── README.md                       # 本文件
 ```

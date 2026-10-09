@@ -38,6 +38,7 @@ static UINT WINAPI FakeSend(UINT count, LPINPUT inputs, int) {
     return sentBatches.size() == 1 && firstSendCount != UINT_MAX ? firstSendCount : count;
 }
 
+// 键盘 API 换成替身，且必须在包含各模块之前定义。
 #define GetAsyncKeyState FakeKeyState
 #define GetForegroundWindow FakeForeground
 #define PostMessageW FakePost
@@ -45,7 +46,18 @@ static UINT WINAPI FakeSend(UINT count, LPINPUT inputs, int) {
 #define SendInput FakeSend
 #define SetWindowsHookExW FakeInstall
 #define UnhookWindowsHookEx FakeUnhook
+
+// 各模块的 .cpp 都编进这一个翻译单元，替身才对所有模块都生效。
 #include "../capslock-switcher/main.cpp"
+#include "../capslock-switcher/banner.cpp"
+#include "../capslock-switcher/keyboard.cpp"
+#include "../capslock-switcher/logging.cpp"
+#include "../capslock-switcher/settings.cpp"
+#include "../capslock-switcher/splash.cpp"
+#include "../capslock-switcher/startup.cpp"
+#include "../capslock-switcher/surface.cpp"
+#include "../capslock-switcher/tray.cpp"
+
 #undef GetAsyncKeyState
 #undef GetForegroundWindow
 #undef PostMessageW
@@ -137,18 +149,41 @@ static void TestKeyboard() {
 }
 
 static void TestRendering() {
-    Gdiplus::GdiplusStartupInput startup;
-    Check(Gdiplus::GdiplusStartup(&g_gdiplusToken, &startup, nullptr) == Gdiplus::Ok, "GDI+ startup");
-    g_gdiplusReady = true;
+    Check(!PrepareSplash(), "splash refuses to render before GDI+ is up");
+    Check(StartGdiplus(), "GDI+ startup");
     g_hInst = GetModuleHandleW(nullptr);
     for (int pass = 0; pass < 20; ++pass) {
         Check(PrepareSplash(), "embedded PNG decodes and draws with source stream alive");
         Check(g_splashWidth > 0 && g_splashHeight > 0, "splash dimensions valid");
         ReleaseSplash();
     }
-    Gdiplus::GdiplusShutdown(g_gdiplusToken);
-    g_gdiplusReady = false;
-    std::puts("PASS: 20 splash decode and release cycles");
+    // 提示横幅：中文红底、英文蓝底，圆角必须真的透明，颜色只预乘一次。
+    for (int chinese = 0; chinese <= 1; ++chinese) {
+        g_bannerChinese = chinese != 0;
+        g_bannerText = chinese != 0 ? L"中文" : L"English";
+        const int width = 200;
+        const int height = 96;
+        Check(RenderBanner(width, height, 96), "banner renders");
+        const auto* pixels = static_cast<const DWORD*>(g_bannerBits);
+        Check(pixels[0] == 0, "banner corner is transparent");
+        Check((pixels[10 * width + width / 2] >> 24) == 255, "banner interior opaque");
+        const COLORREF color = chinese != 0 ? kChineseColor : kEnglishColor;
+        bool hasEdge = false;
+        for (int i = 0; i < width * height; ++i) {
+            const DWORD alpha = pixels[i] >> 24;
+            if (alpha > 0 && alpha < 255) {
+                hasEdge = true;
+                Check(((pixels[i] >> 16) & 255) == GetRValue(color) * alpha / 255 &&
+                      ((pixels[i] >> 8) & 255) == GetGValue(color) * alpha / 255 &&
+                      (pixels[i] & 255) == GetBValue(color) * alpha / 255,
+                      "banner edge colour premultiplied exactly once");
+            }
+        }
+        Check(hasEdge, "banner has an anti-aliased edge");
+        ReleaseBannerSurface();
+    }
+    StopGdiplus();
+    std::puts("PASS: 20 splash decode and release cycles, banner colours and alpha");
 }
 
 static void TestHookThread() {
