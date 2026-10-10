@@ -28,6 +28,8 @@
 #include "../capslock-switcher/app.h"
 #include "../capslock-switcher/config.h"
 #include "../capslock-switcher/startup.h"
+#include "../capslock-switcher/resource.h"
+#include "../capslock-switcher/version.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -180,8 +182,12 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		Resources().MergedDictionaries().Append(XamlControlsResources());
 		m_window = Window();
 		m_window.Title(kWindowTitle);
+		// 标题栏和页面共用一块底：内容延伸进标题栏，Mica 垫在下面。
+		m_window.SystemBackdrop(MicaBackdrop());
+		m_window.ExtendsContentIntoTitleBar(true);
 		BuildUi();
-		SetWindowIcon();
+		m_window.SetTitleBar(m_titleBar);
+		SetupWindow();
 		LoadFromIni();
 		m_window.Activate();
 		StartTimers();
@@ -192,22 +198,47 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 
   private:
 	void BuildUi() {
+		m_startup = ToggleSwitch();
 		m_mapping = ToggleSwitch();
 		m_alt = ToggleSwitch();
 		m_cursor = ToggleSwitch();
-		m_startup = ToggleSwitch();
 		m_percent = Slider();
 		m_percentText = TextBlock();
 		m_log = TextBox();
+		m_titleBar = Grid();
 		StackPanel root;
-		root.Padding(Thickness{ 28, 24, 28, 24 });
+		root.Padding(Thickness{ 28, 40, 28, 24 });
 		root.Spacing(14);
 
 		TextBlock title;
 		title.Text(L"CapsLock Switcher");
 		title.FontSize(26);
 		title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-		root.Children().Append(title);
+		TextBlock version;
+		wchar_t versionLabel[32] = {};
+		swprintf_s(versionLabel, L"v%hs", APP_VERSION);
+		version.Text(versionLabel);
+		version.Opacity(0.6);
+		version.VerticalAlignment(VerticalAlignment::Bottom);
+		version.Margin(Thickness{ 0, 0, 0, 4 });
+		StackPanel titleRow;
+		titleRow.Orientation(Orientation::Horizontal);
+		titleRow.Spacing(10);
+		titleRow.Children().Append(title);
+		titleRow.Children().Append(version);
+		root.Children().Append(titleRow);
+
+		m_startup.OnContent(box_value(L"开机启动 (管理员)"));
+		m_startup.OffContent(box_value(L"开机启动 (管理员)"));
+		m_startup.Toggled([this](auto&&, auto&&) {
+			if (m_loading) {
+				return;
+			}
+			RequestStartupChange(m_startup.IsOn());
+			m_startupPending = true;
+			m_startupSettleUntil = GetTickCount64() + kStartupSettleMs;
+		});
+		root.Children().Append(m_startup);
 
 		m_mapping.OnContent(box_value(L"启用映射 (CapsLock -> Ctrl+Space)"));
 		m_mapping.OffContent(box_value(L"启用映射 (CapsLock -> Ctrl+Space)"));
@@ -225,36 +256,25 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 			m_percent.IsEnabled(m_cursor.IsOn());  // 关掉时滑块变灰、点不动
 			SaveFromControls();
 		});
-		root.Children().Append(m_cursor);
-
-		StackPanel percentRow;
-		percentRow.Orientation(Orientation::Horizontal);
-		percentRow.Spacing(16);
+		StackPanel cursorRow;
+		cursorRow.Orientation(Orientation::Horizontal);
+		cursorRow.Spacing(16);
+		cursorRow.Children().Append(m_cursor);
 		m_percentText.VerticalAlignment(VerticalAlignment::Center);
-		m_percentText.MinWidth(140);
-		percentRow.Children().Append(m_percentText);
+		m_percentText.MinWidth(64);
+		cursorRow.Children().Append(m_percentText);
 		m_percent.Minimum(0);
 		m_percent.Maximum(100);
 		m_percent.StepFrequency(1);
-		m_percent.Width(320);
+		m_percent.Width(200);
+		m_percent.VerticalAlignment(VerticalAlignment::Center);
+		m_percent.Margin(Thickness{ 0, 4, 0, 0 });
 		m_percent.ValueChanged([this](auto&&, auto&&) {
 			UpdatePercentText();
 			ScheduleSave();  // 拖动时攒一下，别每一格都写盘
 		});
-		percentRow.Children().Append(m_percent);
-		root.Children().Append(percentRow);
-
-		m_startup.OnContent(box_value(L"开机启动 (管理员)"));
-		m_startup.OffContent(box_value(L"开机启动 (管理员)"));
-		m_startup.Toggled([this](auto&&, auto&&) {
-			if (m_loading) {
-				return;
-			}
-			RequestStartupChange(m_startup.IsOn());
-			m_startupPending = true;
-			m_startupSettleUntil = GetTickCount64() + kStartupSettleMs;
-		});
-		root.Children().Append(m_startup);
+		cursorRow.Children().Append(m_percent);
+		root.Children().Append(cursorRow);
 
 		StackPanel logHeader;
 		logHeader.Orientation(Orientation::Horizontal);
@@ -284,22 +304,38 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		ScrollViewer::SetVerticalScrollBarVisibility(m_log, ScrollBarVisibility::Auto);
 		root.Children().Append(m_log);
 
+		// 高度是按内容定死的，页面本身不该出现滚动条；真被拉小了还能滚，只是不画条。
 		ScrollViewer scroll;
 		scroll.Content(root);
-		scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-		m_window.Content(scroll);
+		scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Hidden);
+
+		// 顶上这条空带就是标题栏的拖拽区，正文从它下面开始。
+		m_titleBar.Height(32);
+		m_titleBar.VerticalAlignment(VerticalAlignment::Top);
+		m_titleBar.Background(SolidColorBrush(winrt::Windows::UI::Color{ 0, 0, 0, 0 }));
+
+		Grid page;
+		page.Children().Append(scroll);
+		page.Children().Append(m_titleBar);
+		m_window.Content(page);
 	}
 
-	void SetWindowIcon() {
-		const std::wstring icon = AppPath(kMainExeName);
-		const auto appWindow = m_window.AppWindow();
-		if (appWindow != nullptr) {
-			// 图标稍后从随附的 .ico 加载，不把 exe 路径当成图像文件。
-			const UINT dpi = GetDpiForWindow(GetHwnd());
-			const int width = MulDiv(660, static_cast<int>(dpi), 96);
-			const int height = MulDiv(820, static_cast<int>(dpi), 96);
+	void SetupWindow() {
+		const HWND hwnd = GetHwnd();
+		const UINT dpi = GetDpiForWindow(hwnd);
+		const int width = MulDiv(660, static_cast<int>(dpi), 96);
+		const int height = MulDiv(570, static_cast<int>(dpi), 96);
+		if (const auto appWindow = m_window.AppWindow(); appWindow != nullptr) {
 			appWindow.Resize({ width, height });
+			// 标题按钮叠在页面背景上，别再自己画一层底色（0,0,0,0 就是全透明）。
+			const winrt::Windows::UI::Color transparent{ 0, 0, 0, 0 };
+			appWindow.TitleBar().ButtonBackgroundColor(transparent);
+			appWindow.TitleBar().ButtonInactiveBackgroundColor(transparent);
 		}
+		// app.ico 已经嵌进这个 exe；大小图标都设，标题栏和任务栏才都认得。
+		const HICON icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_MAINICON));
+		SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
+		SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
 	}
 
 	HWND GetHwnd() const {
@@ -366,7 +402,7 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 
 	void UpdatePercentText() {
 		wchar_t text[64] = {};
-		swprintf_s(text, L"颜色浓度：%d%%", static_cast<int>(m_percent.Value()));
+		swprintf_s(text, L"浓度 %d%%", static_cast<int>(m_percent.Value()));
 		m_percentText.Text(text);
 	}
 
@@ -390,6 +426,7 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 
 	XamlTypeInfo::XamlControlsXamlMetaDataProvider m_metadata;
 	Window m_window{ nullptr };
+	Grid m_titleBar{ nullptr };
 	ToggleSwitch m_mapping{ nullptr };
 	ToggleSwitch m_alt{ nullptr };
 	ToggleSwitch m_cursor{ nullptr };

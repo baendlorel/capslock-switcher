@@ -64,10 +64,22 @@
     <ClInclude Include="..\capslock-switcher\config.h" />
     <ClInclude Include="..\capslock-switcher\app.h" />
     <ClInclude Include="..\capslock-switcher\startup.h" />
+    <ClInclude Include="..\capslock-switcher\resource.h" />
+    <ClInclude Include="..\capslock-switcher\version.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 图标资源：把 app.ico 嵌进 exe，窗口和任务栏都取它。 -->
+    <ResourceCompile Include="capslock-switcher-settings.rc">
+      <AdditionalIncludeDirectories>$(ProjectDir)../capslock-switcher;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.250606001" />
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.250303.1" />
   </ItemGroup>
+  <!-- 编译前生成版本号头文件：和主程序共用 package.json 里的版本号。 -->
+  <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
+    <Exec Command="node &quot;$(ProjectDir)../capslock-switcher/gen_version.mjs&quot;" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
