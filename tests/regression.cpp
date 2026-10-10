@@ -109,6 +109,7 @@ static int FakeCursorDpi(HWND, HWND) { return cursorDpi; }
 #include "../capslock-switcher/keyboard.cpp"
 #include "../capslock-switcher/logging.cpp"
 #include "../capslock-switcher/config.cpp"
+#include "../capslock-switcher/settings.cpp"
 #include "../capslock-switcher/splash.cpp"
 #include "../capslock-switcher/startup.cpp"
 #include "../capslock-switcher/surface.cpp"

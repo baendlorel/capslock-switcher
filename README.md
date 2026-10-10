@@ -30,9 +30,10 @@
 ## 使用方法
 
 1. 在Visual Studio中打开 `capslock-switcher.slnx` 并编译
-2. 在 `capslock-switcher\x64\Debug`、`capslock-switcher\x64\Release`（x64），
-   或 `capslock-switcher\Debug`、`capslock-switcher\Release`（Win32）目录找到生成的exe文件
-3. 双击运行程序
+2. x64 的产物在仓库根目录：调试用 `x64\Debug\capslock-switcher.exe`，发布用
+   `x64\Release\capslock-switcher.exe`。Release|x64 编译完会自动在根目录打出
+   `capslock-switcher-v<package.json 里的版本号>.zip`（exe + README，解压即用）
+3. 双击运行程序（设置页在主程序里：双击托盘图标，或右键菜单里的"设置..."）
 4. 程序会在系统托盘右下角显示图标
 5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），切换后屏幕中央会闪出当前的输入法
    状态：中文红底"中文"，英文蓝底"English"，约0.5秒后淡出。状态是从前台窗口所在线程的
@@ -151,13 +152,9 @@ CursorTintPercent=100
 - 钩子运行在独立线程，回调只在每次 CapsLock 首次按下时投递 `PostMessage`，
   由主线程执行 `SendInput`；长按不会反复切换，耗时操作也不会阻塞钩子线程。
   如果前台窗口已改变，则丢弃排队的切换请求
-- 主程序在初始化时声明 **Per-Monitor V2 DPI 感知**（`SetProcessDpiAwarenessContext`）。
-  独立的 WinUI3 设置程序通过 `capslock-switcher-settings/app.manifest` 在进程启动前声明
-  **PerMonitorV2**，Debug/Release 都将它嵌入 exe。DPI 设置不会跨进程继承；没有声明时，
-  设置窗口会按 96 DPI 渲染，再被系统放大，文字和控件都会发虚。WinUI 控件继续使用 DIP，
-  由框架按显示器 DPI 渲染，不手动给字号和控件再乘一次缩放。
-  构建后可运行 `./tests/settings-dpi.ps1 -Configuration Release` 检查 exe 内嵌清单；若设置
-  窗口已打开，还会检查窗口真实的 DPI 感知状态。
+- 进程在初始化时声明 **Per-Monitor V2 DPI 感知**（`SetProcessDpiAwarenessContext`），
+  设置页是同一个进程里的 Win32 窗口，跟着进程一起走。窗口尺寸和字体都按它所在显示器的
+  DPI 缩放，`WM_DPICHANGED` 里换字体并按系统给的位置重排，拖到别的显示器不会发虚。
 - `Alt+CapsLock`：以 CapsLock 首次按下时的 Alt 状态决定是否放行，并保持到该键抬起；
   中途松开 Alt 或改变映射开关，都不会拆散按下/抬起事件
 - 启动画面 `umbral-keys.png` 以 RCDATA 资源嵌进 exe（见 `capslock-switcher.rc`），
@@ -165,9 +162,9 @@ CursorTintPercent=100
   ——所以它是真正的逐像素透明，键帽边缘不会出现黑框。
   淡出就是拿同一个 DIB 反复调用 `UpdateLayeredWindow` 并逐级降低 `SourceConstantAlpha`，
   不需要重新解码或重绘
-- 设置的读写就在 `settings.cpp` 里，`GetPrivateProfileStringW`/`WritePrivateProfileStringW`
-  直接操作 exe 旁边的 ini，没有额外的配置层：加载时逐项校验，坏值退默认并重写文件；
-  每次改动只写回那四个键。
+- 设置的读写就在 `config.cpp` 里，`GetPrivateProfileStringW`/`WritePrivateProfileStringW`
+  直接操作 exe 旁边的 ini，没有额外的配置层：读取时逐项校验，坏值退默认并重写文件；
+  每次改动只写回那四个键。设置页改完写盘后立刻重读一遍应用下去，启动时也走同一条路径。
 - 开机启动用计划任务实现（`schtasks /SC ONLOGON /RL HIGHEST`），因为"登录时以管理员身份
   启动且不弹 UAC"只有计划任务的"最高权限"能做到，启动文件夹的快捷方式做不到。
   创建任务本身需要管理员权限，所以菜单项会用 `ShellExecuteW(..., "runas", ...)`
@@ -244,7 +241,8 @@ capslock-switcher/
 │   ├── tray.cpp / tray.h           # 托盘图标与右键菜单
 │   ├── startup.cpp / startup.h     # 开机启动（计划任务 + 提权副本）
 │   ├── splash.cpp / splash.h       # 启动画面
-│   ├── settings.cpp / settings.h   # 设置页（设置项 + 日志）与 ini 读写
+│   ├── settings.cpp / settings.h   # 设置页（设置项 + 实时日志），进程内窗口
+│   ├── config.cpp / config.h       # ini 读写（键名、取值范围、坏值处理）
 │   ├── logging.cpp / logging.h     # 诊断日志
 │   ├── surface.cpp / surface.h     # 分层窗口与 DPI 辅助
 │   ├── resource.h                  # 资源ID头文件

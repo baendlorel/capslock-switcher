@@ -1,6 +1,7 @@
 ﻿#include "settings.h"
 
 #include "app.h"
+#include "config.h"
 #include "logging.h"
 #include "resource.h"
 #include "surface.h"
@@ -319,6 +320,18 @@ void SyncControls() {
 	             g_startupTaskInstalled ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
+// 把控件上的状态落盘并立刻生效。设置页就在本进程里，写完之后重读一遍应用下去，
+// "ini → 运行状态"这条路径只有一处（主程序启动时也走它）。
+void SaveSettings() {
+	const AppSettings settings = {
+	    SendMessageW(g_chkMapping, BM_GETCHECK, 0, 0) == BST_CHECKED,
+	    SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED,
+	    SendMessageW(g_chkCursorTint, BM_GETCHECK, 0, 0) == BST_CHECKED,
+	    static_cast<int>(SendMessageW(g_sldCursor, TBM_GETPOS, 0, 0)),
+	};
+	WriteSettings(settings);
+	ApplySettingsFromIni();
+}
 LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM wParam,
                               const LPARAM lParam) {
 	switch (message) {
@@ -397,8 +410,7 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 	case WM_HSCROLL:
 		// 只有这一个滑块，拖它就等于改指针颜色的浓度。
 		if (reinterpret_cast<HWND>(lParam) == g_sldCursor) {
-			SetCursorTintPercent(
-			    static_cast<int>(SendMessageW(g_sldCursor, TBM_GETPOS, 0, 0)));
+			SaveSettings();
 			SyncControls();
 		}
 		return 0;
@@ -406,14 +418,12 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
 		case kIdChkMapping:
-			SetMappingEnabled(SendMessageW(g_chkMapping, BM_GETCHECK, 0, 0) == BST_CHECKED);
-			return 0;
 		case kIdChkAlt:
-			SetAltCapsLockEnabled(SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED);
+			SaveSettings();
 			return 0;
 		case kIdChkCursorTint:
-			SetCursorTintEnabled(SendMessageW(g_chkCursorTint, BM_GETCHECK, 0, 0) == BST_CHECKED);
-			SyncControls();
+			SaveSettings();
+			SyncControls();  // 总开关关掉时把滑块变灰
 			return 0;
 		case kIdChkStartup:
 			g_startupPending = true;
@@ -445,117 +455,30 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 
 }  // 匿名命名空间
 
-namespace {
-
-constexpr wchar_t kIniSection[] = L"General";
-
-// 绿色版：设置就放在 exe 旁边，换目录不用改注册表。路径在第一次用到时算一次。
-const wchar_t* IniPath() {
-	static wchar_t path[MAX_PATH] = {};
-	if (path[0] != L'\0') {
-		return path;
-	}
-	const wchar_t* exe = ExePath();
-	const size_t length = wcslen(exe);
-	if (length == 0 || length + 5 >= _countof(path)) {
-		return L"";  // 路径都拼不出来的话，读写自然全部失败，设置只是不落盘
-	}
-	wcscpy_s(path, exe);
-	if (wchar_t* dot = wcsrchr(path, L'.')) {
-		*dot = L'\0';  // 把 .exe 换成 .ini
-	}
-	wcscat_s(path, L".ini");
-	return path;
-}
-
-// 只接受整数，而且必须整数完整占满整个值：多一个字符就算写坏了。
-bool ReadIniInt(const wchar_t* key, const int low, const int high, int& out) {
-	wchar_t text[32] = {};
-	GetPrivateProfileStringW(kIniSection, key, L"", text, _countof(text), IniPath());
-	wchar_t* end = nullptr;
-	const long value = wcstol(text, &end, 10);
-	if (end == text || *end != L'\0' || value < low || value > high) {
-		return false;
-	}
-	out = static_cast<int>(value);
-	return true;
-}
-
-}  // 匿名命名空间
-
-void SaveSettings() {
-	struct Entry {
-		const wchar_t* key;
-		int value;
-	};
-	const Entry entries[] = {
-		{ L"MappingEnabled", g_enabled.load() ? 1 : 0 },
-		{ L"AltCapsLockPassThrough", g_altPassThrough.load() ? 1 : 0 },
-		{ L"CursorTintEnabled", g_cursorTintEnabled.load() ? 1 : 0 },
-		{ L"CursorTintPercent", g_cursorTintPercent.load() },
-	};
-	for (const Entry& entry : entries) {
-		wchar_t text[8] = {};
-		swprintf_s(text, L"%d", entry.value);
-		if (WritePrivateProfileStringW(kIniSection, entry.key, text, IniPath()) == FALSE) {
-			Log(L"设置写不进 %s（%lu）", IniPath(), GetLastError());
-			return;
-		}
-	}
-}
-
-// 逐项读；哪一项缺失或写坏了就用默认值顶上，并立刻把整份文件重写成合法内容，
-// 免得以后每次启动都走一遍修复。
-void LoadSettings() {
-	int mapping = kDefaultEnabled ? 1 : 0;
-	int alt = kDefaultAltPassThrough ? 1 : 0;
-	int tint = kDefaultCursorTintEnabled ? 1 : 0;
-	int percent = kDefaultCursorTintPercent;
-	const bool valid = ReadIniInt(L"MappingEnabled", 0, 1, mapping) &
-	                   ReadIniInt(L"AltCapsLockPassThrough", 0, 1, alt) &
-	                   ReadIniInt(L"CursorTintEnabled", 0, 1, tint) &
-	                   ReadIniInt(L"CursorTintPercent", 0, 100, percent);
-	g_enabled = mapping != 0;
-	g_altPassThrough = alt != 0;
-	g_cursorTintEnabled = tint != 0;
-	g_cursorTintPercent = percent;
-	if (valid) {
-		return;
-	}
-	Log(L"设置文件缺失或写坏了，已用默认值覆盖：%s", IniPath());
-	DeleteFileW(IniPath());
-	SaveSettings();
-}
-
-void CreateSettingsWindow(const HINSTANCE instance) {
-	WNDCLASSEX wcex = {};
-	wcex.cbSize = sizeof(WNDCLASSEX);
-	wcex.lpfnWndProc = SettingsProc;
-	wcex.hInstance = instance;
-	wcex.lpszClassName = kSettingsClass;
-	wcex.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_MAINICON));
-	wcex.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-	wcex.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-	if (RegisterClassExW(&wcex) == 0) {
-		Log(L"settings: RegisterClassEx failed (%lu)", GetLastError());
-		return;
-	}
-
-	const int dpi = ScreenDpi(nullptr, nullptr);
-	g_wnd = CreateWindowExW(0, kSettingsClass, kSettingsTitle, WS_OVERLAPPEDWINDOW,
-	                        CW_USEDEFAULT, 0, MulDiv(620, dpi, 96), MulDiv(460, dpi, 96),
-	                        nullptr, nullptr, instance, nullptr);
-	if (g_wnd == nullptr) {
-		Log(L"settings: CreateWindowEx failed (%lu)", GetLastError());
-	}
-}
 
 void OpenSettingsWindow() {
 	if (g_wnd == nullptr) {
-		CreateSettingsWindow(g_hInst);
-	}
-	if (g_wnd == nullptr) {
-		return;
+		// 第一次打开才建：注册窗口类，建一个初始隐藏的窗口，之后只是显示/前置。
+		WNDCLASSEX wcex = {};
+		wcex.cbSize = sizeof(WNDCLASSEX);
+		wcex.lpfnWndProc = SettingsProc;
+		wcex.hInstance = g_hInst;
+		wcex.lpszClassName = kSettingsClass;
+		wcex.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_MAINICON));
+		wcex.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+		wcex.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+		if (RegisterClassExW(&wcex) == 0) {
+			Log(L"settings: RegisterClassEx failed (%lu)", GetLastError());
+			return;
+		}
+		const int dpi = ScreenDpi();
+		g_wnd = CreateWindowExW(0, kSettingsClass, kSettingsTitle, WS_OVERLAPPEDWINDOW,
+		                        CW_USEDEFAULT, 0, MulDiv(620, dpi, 96), MulDiv(460, dpi, 96),
+		                        nullptr, nullptr, g_hInst, nullptr);
+		if (g_wnd == nullptr) {
+			Log(L"settings: CreateWindowEx failed (%lu)", GetLastError());
+			return;
+		}
 	}
 	ShowWindow(g_wnd, SW_SHOWNORMAL);  // 最小化的话顺便还原
 	SetForegroundWindow(g_wnd);

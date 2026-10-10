@@ -2,8 +2,8 @@
 
 #include <Windows.h>
 
-// 设置存在 exe 旁边的 capslock-switcher.ini 里。主程序（Win32）和设置界面（WinUI3）是
-// 两个进程，共用这一份读写：键名、取值范围、坏值处理必须一致，两边才不会互相打架。
+// 设置存在 exe 旁边的 capslock-switcher.ini 里。启动时和设置页每次改动都读这一份：
+// 键名、取值范围、坏值处理只有一处，不会两边各写一套。
 struct AppSettings {
 	bool mappingEnabled;         // CapsLock -> Ctrl+Space
 	bool altCapsLockPassThrough; // Alt+CapsLock = 原来的大写锁定

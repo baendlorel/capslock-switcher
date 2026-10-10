@@ -4,5 +4,4 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="capslock-switcher/capslock-switcher.vcxproj" Id="0f9e43ce-9133-45e4-acc1-ea0d81fd794f" />
-  <Project Path="capslock-switcher-settings/capslock-switcher-settings.vcxproj" Id="7c4e1a93-2d58-4f0b-9e31-5a6b7c8d9e01" />
 </Solution>

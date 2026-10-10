@@ -153,6 +153,7 @@
     <ClInclude Include="keyboard.h" />
     <ClInclude Include="logging.h" />
     <ClInclude Include="config.h" />
+    <ClInclude Include="settings.h" />
     <ClInclude Include="splash.h" />
     <ClInclude Include="startup.h" />
     <ClInclude Include="surface.h" />
@@ -165,6 +166,7 @@
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="logging.cpp" />
     <ClCompile Include="config.cpp" />
+    <ClCompile Include="settings.cpp" />
     <ClCompile Include="splash.cpp" />
     <ClCompile Include="startup.cpp" />
     <ClCompile Include="surface.cpp" />
@@ -184,6 +186,22 @@
   <!-- 编译前生成版本号头文件（路径带空格也能正常工作）。 -->
   <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
     <Exec Command="node &quot;$(ProjectDir)gen_version.mjs&quot;" />
+  </Target>
+  <!-- 编译完自动打绿色包：一个 exe（设置页也在里面）+ README。程序静态链接 CRT，
+       不需要任何运行库，解压就能跑。 -->
+  <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Exec Command="node -e &quot;console.log(require('./package.json').version)&quot;"
+          WorkingDirectory="$(ProjectDir).." ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="AppVersion" />
+    </Exec>
+    <Error Condition="!Exists('$(OutDir)capslock-switcher.exe')" Text="找不到 $(OutDir)capslock-switcher.exe，先编译成功再打包。" />
+    <!-- 每次清空 staging，免得上次的 ini、日志混进包里。 -->
+    <RemoveDir Directories="$(ProjectDir)x64\Release\package" />
+    <Copy SourceFiles="$(OutDir)capslock-switcher.exe;$(ProjectDir)..\README.md" DestinationFolder="$(ProjectDir)x64\Release\package" />
+    <ZipDirectory SourceDirectory="$(ProjectDir)x64\Release\package"
+                  DestinationFile="$(ProjectDir)../capslock-switcher-v$(AppVersion).zip"
+                  Overwrite="true" />
+    <Message Importance="high" Text="已打包：capslock-switcher-v$(AppVersion).zip" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

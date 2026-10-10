@@ -7,7 +7,7 @@
 // 中间不再加回调、适配器之类的一层。
 
 constexpr wchar_t kAppTitle[] = L"CapsLock Switcher";
-// 主窗口的类名：设置界面（另一个进程）靠它找到主程序，把"设置变了"的通知投过去。
+// 主窗口的类名：第二次启动时靠它找到已经在跑的那个实例，把托盘图标重新挂回去。
 constexpr wchar_t kMainWindowClass[] = L"CapsLockSwitcherClass";
 
 // 中英文状态色：中央横幅和鼠标指针共用同一份，两边的颜色必须一致。
@@ -41,8 +41,6 @@ constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
 // CapsLock 这次没被映射掉（Alt+CapsLock，或者映射被关掉了）：只把这件事记进日志。
 // wParam 非 0 表示是 Alt 按着。
 constexpr UINT WM_CAPS_LOCK_PASSED = WM_APP + 4;
-// 设置界面（另一个进程）改完 ini 之后发过来的：重新读一遍并立刻生效。
-constexpr UINT WM_RELOAD_SETTINGS = WM_APP + 5;
 
 // 主窗口上的定时器。
 constexpr UINT_PTR kTimerRetryStartup = 1;
@@ -55,5 +53,7 @@ constexpr UINT kRetryStartupMs = 2000;
 constexpr UINT kStartupRefreshDelayMs = 3000;
 
 void SetStartupEnabled(bool enable);  // startup.cpp
-// cursor.cpp：把 ini 里的开关和浓度应用下去。开关状态本身由设置界面维护，这里只负责生效。
+// cursor.cpp：把开关和浓度应用下去。开关状态本身由设置页维护，这里只负责生效。
 void ApplyCursorTintSettings(bool enabled, int percent);
+// main.cpp：读 exe 旁边的 ini 并应用。启动时一次，设置页改完再一次。
+void ApplySettingsFromIni();

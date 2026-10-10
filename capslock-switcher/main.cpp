@@ -18,6 +18,7 @@
 #include "cursor.h"
 #include "keyboard.h"
 #include "logging.h"
+#include "settings.h"
 #include "config.h"
 #include "splash.h"
 #include "surface.h"
@@ -136,19 +137,6 @@ void EnsureInstalled(const HWND hwnd) {
 	SetTimer(hwnd, kTimerRetryStartup, kRetryStartupMs, nullptr);
 }
 
-// 把 ini 里的设置应用到运行状态。启动时读一次；设置界面（另一个进程）改完会发
-// WM_RELOAD_SETTINGS 过来，再走一遍这里。
-void ApplySettingsFromIni() {
-	bool repaired = false;
-	const AppSettings settings = ReadSettings(&repaired);
-	if (repaired) {
-		Log(L"设置文件缺失或写坏了，已用默认值覆盖：%s", SettingsPath());
-	}
-	g_enabled = settings.mappingEnabled;
-	g_altPassThrough = settings.altCapsLockPassThrough;
-	ApplyCursorTintSettings(settings.cursorTintEnabled, settings.cursorTintPercent);
-	UpdateTrayTooltip();  // 映射开关变了，悬停提示要跟上
-}
 
 // 每分钟跑一次。Windows 会不声不响地摘掉超时的低级钩子，外壳会在 Explorer
 // 重启时丢掉托盘图标，所以这里把两者都重新挂一遍。配合快速重试和
@@ -199,10 +187,6 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		InitializeCursorTint();
 		break;
 
-	case WM_RELOAD_SETTINGS:
-		// 设置界面改完 ini 发过来的，重读一遍立刻生效。
-		ApplySettingsFromIni();
-		break;
 
 	case WM_TIMER:
 		if (wParam == kTimerRetryStartup) {
@@ -250,7 +234,7 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 	case WM_TRAYICON:
 		// 双击直接开设置页，右键出菜单（菜单里也有"设置..."）。
 		if (lParam == WM_LBUTTONDBLCLK) {
-			OpenSettingsApp();
+			OpenSettingsWindow();
 		} else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
 			ShowTrayMenu(hwnd);
 		}
@@ -262,6 +246,7 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		KillTimer(hwnd, kTimerRefreshStartup);
 		// 还原系统光标要趁早：后面的清理就算出了岔子，也不能让它拦住这一步。
 		DestroyCursorTint();
+		DestroySettingsWindow();
 		DestroySplashWindow();
 		DestroyBannerWindow();
 		UninstallHook();
@@ -301,6 +286,19 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 
 }  // 匿名命名空间
 
+// 把 ini 里的设置应用到运行状态。启动时读一次，设置页改完再走一遍——"ini → 运行状态"
+// 只有这一条路径，两边不会各写一份。
+void ApplySettingsFromIni() {
+	bool repaired = false;
+	const AppSettings settings = ReadSettings(&repaired);
+	if (repaired) {
+		Log(L"设置文件缺失或写坏了，已用默认值覆盖：%s", SettingsPath());
+	}
+	g_enabled = settings.mappingEnabled;
+	g_altPassThrough = settings.altCapsLockPassThrough;
+	ApplyCursorTintSettings(settings.cursorTintEnabled, settings.cursorTintPercent);
+	UpdateTrayTooltip();  // 映射开关变了，悬停提示要跟上
+}
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(nCmdShow);
@@ -416,6 +414,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			const DWORD lastError = GetLastError();
 			LogMessageLoopFailure(lastError);
 			break;
+		}
+		if (HandleSettingsMessage(&msg)) {
+			continue;  // 设置页的 Tab/Esc 由 IsDialogMessage 处理
 		}
 		TranslateMessage(&msg);
 		DispatchMessageW(&msg);
