@@ -154,6 +154,55 @@ void ApplyFont(const HWND parent, const HFONT font) {
 	}
 }
 
+// 系统默认是"点轨道 = 挪一页"，点哪都不跟手。这里自己算位置：点到哪就跳到哪，
+// 按住不放还能继续拖着走；点在滑块本身上时交回系统，保留原来的拖动。
+void JumpSliderToClick(const HWND slider, const int x) {
+	RECT channel = {};
+	SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
+	const int width = channel.right - channel.left;
+	if (width <= 0) {
+		return;
+	}
+	const int low = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
+	const int high = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+	int value = low + (x - channel.left) * (high - low) / width;
+	value = value < low ? low : value > high ? high : value;
+	SendMessageW(slider, TBM_SETPOS, TRUE, value);
+	SendMessageW(GetParent(slider), WM_HSCROLL, MAKEWPARAM(SB_THUMBPOSITION, value),
+	             reinterpret_cast<LPARAM>(slider));
+}
+
+LRESULT CALLBACK SliderProc(const HWND slider, const UINT message, const WPARAM wParam,
+                            const LPARAM lParam, UINT_PTR, DWORD_PTR) {
+	switch (message) {
+	case WM_LBUTTONDOWN: {
+		RECT thumb = {};
+		SendMessageW(slider, TBM_GETTHUMBRECT, 0, reinterpret_cast<LPARAM>(&thumb));
+		const int x = static_cast<short>(LOWORD(lParam));
+		const POINT point = { x, static_cast<short>(HIWORD(lParam)) };
+		if (!PtInRect(&thumb, point)) {
+			JumpSliderToClick(slider, x);
+			SetCapture(slider);
+			return 0;
+		}
+		break;
+	}
+	case WM_MOUSEMOVE:
+		if (GetCapture() == slider) {
+			JumpSliderToClick(slider, static_cast<short>(LOWORD(lParam)));
+			return 0;
+		}
+		break;
+	case WM_LBUTTONUP:
+		if (GetCapture() == slider) {
+			ReleaseCapture();
+			return 0;
+		}
+		break;
+	}
+	return DefSubclassProc(slider, message, wParam, lParam);
+}
+
 void CreateControls(const HWND wnd) {
 	g_font = MakeUiFont(ScreenDpi(wnd, wnd));
 
@@ -185,6 +234,7 @@ void CreateControls(const HWND wnd) {
 	SendMessageW(g_sldCursor, TBM_SETTICFREQ, 10, 0);
 	SendMessageW(g_sldCursor, TBM_SETPAGESIZE, 0, 10);
 	SendMessageW(g_sldCursor, TBM_SETPOS, TRUE, g_cursorTintPercent.load());
+	SetWindowSubclass(g_sldCursor, SliderProc, 0, 0);
 	g_chkStartup = CreateWindowExW(
 	    0, L"BUTTON", L"开机启动 (管理员)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,

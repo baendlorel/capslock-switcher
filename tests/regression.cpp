@@ -789,6 +789,42 @@ static void TestSettingsFile() {
     std::puts("PASS: settings ini, broken values fall back and are rewritten");
 }
 
+static void TestSliderClick() {
+    // 系统默认点轨道只挪一页；子类化之后应该点哪跳哪，点滑块本身则不动。
+    const INITCOMMONCONTROLSEX commonControls = {
+        static_cast<DWORD>(sizeof(commonControls)), ICC_BAR_CLASSES
+    };
+    InitCommonControlsEx(&commonControls);
+    const HWND wnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 300, 120, nullptr,
+                                     nullptr, nullptr, nullptr);
+    const HWND slider = CreateWindowExW(
+        0, L"msctls_trackbar32", L"", WS_CHILD | TBS_HORZ | TBS_AUTOTICKS, 0, 0, 200, 40, wnd,
+        nullptr, nullptr, nullptr);
+    Check(wnd != nullptr && slider != nullptr, "create a real trackbar to click on");
+    SendMessageW(slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(slider, TBM_SETPOS, TRUE, 50);
+    SetWindowSubclass(slider, SliderProc, 0, 0);
+
+    RECT channel = {};
+    SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
+    Check(channel.right > channel.left, "the trackbar reports a usable channel");
+
+    const auto click = [&](const int x) {
+        SendMessageW(slider, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, 20));
+        SendMessageW(slider, WM_LBUTTONUP, 0, MAKELPARAM(x, 20));
+        return static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
+    };
+    Check(click(channel.right) >= 95, "clicking the right end jumps to the top");
+    Check(click(channel.left) <= 5, "clicking the left end jumps to the bottom");
+
+    const int middle = (channel.left + channel.right) / 2;
+    const int centered = click(middle);
+    Check(centered >= 45 && centered <= 55, "clicking the middle lands in the middle");
+    Check(click(middle) == centered, "clicking the thumb itself does not move it");
+    DestroyWindow(wnd);
+    std::puts("PASS: the tint slider jumps to where it is clicked");
+}
+
 int main() {
     _RTC_SetErrorFunc(OnRuntimeCheckFailure);
     BuildPaths();  // 设置文件路径跟着 exe 走
@@ -798,6 +834,7 @@ int main() {
     TestCursor();
     TestStartupTaskXml();
     TestSettingsFile();
+    TestSliderClick();
     std::puts("All regression checks passed.");
     return 0;
 }

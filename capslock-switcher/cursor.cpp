@@ -578,8 +578,12 @@ void SyncCursorTint(const bool wasOn) {
 }
 
 void SetCursorTintPercent(const int percent) {
+	const int wanted = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	if (wanted == g_cursorTintPercent.load()) {
+		return;  // 拖动时同一档会被反复上报：值没变就别重刷、也别再写一次 ini
+	}
 	const bool wasOn = TintOn();
-	g_cursorTintPercent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	g_cursorTintPercent = wanted;
 	SyncCursorTint(wasOn);
 	SaveSettings();
 }
