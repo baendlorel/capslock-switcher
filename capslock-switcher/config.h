@@ -5,7 +5,7 @@
 // 设置存在 exe 旁边的 capslock-switcher.ini 里。启动时和设置页每次改动都读这一份：
 // 键名、取值范围、坏值处理只有一处，不会两边各写一套。
 struct AppSettings {
-	bool mappingEnabled;         // CapsLock -> Ctrl+Space
+	bool mappingEnabled;         // 中文中/英、日语平/片/英
 	bool altCapsLockPassThrough; // Alt+CapsLock = 原来的大写锁定
 	bool cursorTintEnabled;      // 鼠标指针跟着中英文变色
 	int cursorTintPercent;       // 0~100

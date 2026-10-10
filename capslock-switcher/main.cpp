@@ -1,4 +1,4 @@
-﻿// CapsLock Switcher：把 CapsLock 映射成 Ctrl+Space，方便切换中英文输入法。
+﻿// CapsLock Switcher：中文切中/英，日语循环平假名/片假名/英文。
 //
 // 这个文件只负责"进程外壳"：单实例、隐藏的主窗口，以及它的消息循环。
 // 具体功能各自成模块：
@@ -205,27 +205,24 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		}
 		break;
 
-	case WM_SWITCH_IME:
-		// 钩子在 CapsLock 按下时就记下了前台窗口：如果用户之后换了窗口，
-		// 这条请求就已经过期了。
-		if (g_enabled && reinterpret_cast<HWND>(wParam) == GetForegroundWindow()) {
-			// 每按一下都记一行，设置页的日志窗口会跟着显示出来。
-			Log(SendCtrlSpace() ? L"CapsLock -> Ctrl+Space：切换输入法"
-			                    : L"CapsLock -> Ctrl+Space：注入失败，这次没切");
-			ShowSwitchBanner();
-			// 指针和横幅看同一个状态，但各走各的去抖：横幅窗口创建失败也不该拖累指针。
+	case WM_SWITCH_IME: {
+		const HWND target = reinterpret_cast<HWND>(wParam);
+		const HKL layout = reinterpret_cast<HKL>(lParam);
+		if (g_enabled && SwitchInputMode(target, layout)) {
+			ShowSwitchBanner(target, layout);
 			CursorSwitchSettle();
 		}
 		break;
+	}
 
 	case WM_CAPS_LOCK_PASSED: {
-		// 没被映射掉的那一次按键：映射关着、按着 Alt，或者前台不是中文输入法。
+		// 没被映射掉的那一次按键：映射关着、按着 Alt，或者前台不是中/日输入法。
 		// wParam 是哪一种（见 app.h 的 kCapsPassed*），lParam 是钩子自己数出来的
 		// 大写锁定状态（抬起时已经翻过）。三种情况各一行日志，文字在这张表里。
 		static constexpr const wchar_t* kPassText[] = {
 			L"映射已关闭：CapsLock 原样放行（现在%s）",
 			L"Alt+CapsLock：放行给原来的大写锁定（现在%s）",
-			L"非中文输入法：CapsLock 原样放行（现在%s）",
+			L"非中/日输入法：CapsLock 原样放行（现在%s）",
 		};
 		const WPARAM reason = wParam <= kCapsPassedOtherLanguage ? wParam : kCapsPassedMappingOff;
 		const bool upper = lParam != 0;

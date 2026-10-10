@@ -2,7 +2,7 @@
 
 #include <Windows.h>
 
-// 鼠标指针跟着中英文状态变色：中文红、英文蓝，跟中央横幅同一份颜色。设置页有总开关，
+// 鼠标指针跟着输入模式变色：中文红、平假名黄、片假名橙、英文蓝，和横幅底色是同一份颜色。
 // 关掉就整体停用；开着时滑块控制程度，100% 是完整颜色，0% 相当于关掉。
 //
 // SetSystemCursor 替换的是会话级的箭头、I 型、手型、十字、横竖拉伸，所有使用系统光标的应用都会受影响。
@@ -15,7 +15,7 @@
 // 强杀不能自动还原，但下次启动仍从干净文件读源，不会累积染色。
 // .ani、没有可读静态文件的槽和自带光标的应用保持原样；高对比度下不染。
 void InitializeCursorTint();     // WM_CREATE：读方案原图 + 挂前台事件 + 首次上色
-void CursorSwitchSettle();       // WM_SWITCH_IME：起 50ms 去抖，等 Ctrl+Space 先生效
+void CursorSwitchSettle();       // WM_SWITCH_IME：起 50ms 去抖，等模式切换键先生效
 void CursorSettleTick();         // 主窗口 WM_TIMER(kTimerCursorSettle)
 void CursorPollTick();           // 主窗口 WM_TIMER(kTimerCursorPoll)
 void OnSystemCursorsChanged();   // WM_SETTINGCHANGE(SPI_SETCURSORS / SPI_SETHIGHCONTRAST)

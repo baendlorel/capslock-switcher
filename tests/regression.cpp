@@ -2,6 +2,7 @@
 // 不会注入任何按键，也不会安装全局键盘钩子。
 #define NOMINMAX
 #include <Windows.h>
+#include <imm.h>
 #include <rtcapi.h>  // /RTC1 的报错回调：别弹对话框，直接报出来退出
 #include <vector>
 #include <cstdio>
@@ -22,6 +23,34 @@ static int __cdecl OnRuntimeCheckFailure(int, const char* fileName, int line, co
     std::exit(1);
 }
 
+static HWND testForeground = reinterpret_cast<HWND>(1);
+static DWORD foregroundThread = 42;
+static HKL activeLayout = reinterpret_cast<HKL>(0x0804);
+static bool focusAvailable = true;
+static bool imeAvailable = true;
+static bool imeResponsive = true;
+static bool imeOpen = true;
+static DWORD_PTR imeConversion = IME_CMODE_NATIVE;
+static bool changeLayoutOnProbe = false;
+static bool shiftHeld = false;
+static bool altHeld = false;
+static bool winHeld = false;
+static bool imeKeyHeld = false;
+static DWORD WINAPI FakeWindowThread(HWND window, LPDWORD) {
+    return window == testForeground ? foregroundThread : 0;
+}
+static HKL WINAPI FakeLayout(DWORD thread) { return thread == foregroundThread ? activeLayout : nullptr; }
+static BOOL WINAPI FakeGUIThreadInfo(DWORD, PGUITHREADINFO info) {
+    info->hwndFocus = focusAvailable ? reinterpret_cast<HWND>(2) : nullptr;
+    return focusAvailable;
+}
+static HWND WINAPI FakeImeWindow(HWND) { return imeAvailable ? reinterpret_cast<HWND>(3) : nullptr; }
+static LRESULT WINAPI FakeImeMessage(HWND, UINT message, WPARAM command, LPARAM, UINT, UINT, PDWORD_PTR value) {
+    if (message != WM_IME_CONTROL || !imeResponsive) { return 0; }
+    *value = command == 0x0005 /* IMC_GETOPENSTATUS */ ? (imeOpen ? 1 : 0) : imeConversion;
+    if (changeLayoutOnProbe) { activeLayout = reinterpret_cast<HKL>(0x0409); }
+    return 1;
+}
 static bool ctrlHeld = false;
 static bool spaceHeld = false;
 static bool postSucceeds = true;
@@ -43,10 +72,12 @@ static HHOOK WINAPI FakeInstall(int, HOOKPROC, HINSTANCE, DWORD) {
 }
 static BOOL WINAPI FakeUnhook(HHOOK) { ++hooksRemoved; return TRUE; }
 static SHORT WINAPI FakeKeyState(int key) {
-    return ((key == VK_CONTROL && ctrlHeld) || (key == VK_SPACE && spaceHeld))
+    return ((key == VK_CONTROL && ctrlHeld) || (key == VK_SPACE && spaceHeld) ||
+            (key == VK_SHIFT && shiftHeld) || (key == VK_MENU && altHeld) ||
+            (key == VK_LWIN && winHeld) || ((key == VK_IME_ON || key == VK_IME_OFF) && imeKeyHeld))
         ? static_cast<SHORT>(0x8000) : 0;
 }
-static HWND WINAPI FakeForeground() { return reinterpret_cast<HWND>(1); }
+static HWND WINAPI FakeForeground() { return testForeground; }
 static BOOL WINAPI FakePost(HWND, UINT message, WPARAM wParam, LPARAM lParam) {
     posted.push_back({ message, wParam, lParam });
     return postSucceeds;
@@ -66,6 +97,11 @@ static HWINEVENTHOOK WINAPI FakeSetWinEventHook(DWORD, DWORD, HMODULE, WINEVENTP
 static BOOL WINAPI FakeUnhookWinEvent(HWINEVENTHOOK hook);
 
 // 键盘 API 换成替身，且必须在包含各模块之前定义。
+#define GetWindowThreadProcessId FakeWindowThread
+#define GetKeyboardLayout FakeLayout
+#define GetGUIThreadInfo FakeGUIThreadInfo
+#define ImmGetDefaultIMEWnd FakeImeWindow
+#define SendMessageTimeoutW FakeImeMessage
 #define GetAsyncKeyState FakeKeyState
 #define GetForegroundWindow FakeForeground
 #define PostMessageW FakePost
@@ -115,6 +151,11 @@ static int FakeCursorDpi(HWND, HWND) { return cursorDpi; }
 #include "../capslock-switcher/surface.cpp"
 #include "../capslock-switcher/tray.cpp"
 
+#undef GetWindowThreadProcessId
+#undef GetKeyboardLayout
+#undef GetGUIThreadInfo
+#undef ImmGetDefaultIMEWnd
+#undef SendMessageTimeoutW
 #undef GetAsyncKeyState
 #undef GetForegroundWindow
 #undef PostMessageW
@@ -209,7 +250,13 @@ static void ResetKeyboard() {
     g_capsDown = false;
     g_capsSwallowed = false;
     g_capsLockOn = false;
-    g_capsPassedAsAlt = false;
+    g_capsPassReason = kCapsPassedMappingOff;
+    testForeground = reinterpret_cast<HWND>(1);
+    foregroundThread = 42;
+    activeLayout = reinterpret_cast<HKL>(0x0804);
+    focusAvailable = imeAvailable = imeResponsive = imeOpen = true;
+    imeConversion = 0;
+    shiftHeld = altHeld = winHeld = imeKeyHeld = changeLayoutOnProbe = false;
     g_enabled = true;
     g_altPassThrough = true;
     posted.clear();
@@ -269,20 +316,20 @@ static void TestKeyboard() {
     Check(Key(WM_KEYDOWN) == 0 && Key(WM_KEYUP) == 0, "queue failure preserves original key pair");
 
     ResetKeyboard();
-    Check(SendCtrlSpace(), "normal injection succeeds");
+    Check(SwitchInputMode(testForeground, activeLayout), "normal injection succeeds");
     Check(sentBatches[0].size() == 4, "normal chord has four events");
     ResetKeyboard();
     ctrlHeld = true;
-    Check(SendCtrlSpace(), "held Ctrl injection succeeds");
+    Check(SwitchInputMode(testForeground, activeLayout), "held Ctrl injection succeeds");
     Check(sentBatches[0].size() == 2 && sentBatches[0][0].ki.wVk == VK_SPACE &&
           sentBatches[0][1].ki.wVk == VK_SPACE, "held Ctrl is never released");
     ResetKeyboard();
     spaceHeld = true;
-    Check(!SendCtrlSpace() && sentBatches.empty(), "held Space is left untouched");
+    Check(!SwitchInputMode(testForeground, activeLayout) && sentBatches.empty(), "held Space is left untouched");
     for (UINT inserted = 0; inserted < 4; ++inserted) {
         ResetKeyboard();
         firstSendCount = inserted;
-        Check(!SendCtrlSpace(), "partial injection reports failure");
+        Check(!SwitchInputMode(testForeground, activeLayout), "partial injection reports failure");
         Check(sentBatches.size() == (inserted == 0 ? 1u : 2u), "only inserted keys need cleanup");
         if (inserted > 0) {
             for (const INPUT& release : sentBatches[1]) {
@@ -292,6 +339,104 @@ static void TestKeyboard() {
         }
     }
     std::puts("PASS: key pairing, repeat, modifiers, queue failure, partial injection");
+}
+
+
+static void TestJapanese() {
+    ResetKeyboard();
+    for (const ULONG_PTR language : { 0x0804, 0x0404, 0x0c04, 0x0411 }) {
+        activeLayout = reinterpret_cast<HKL>(language);
+        posted.clear();
+        Check(Key(WM_KEYDOWN) == 1 && Key(WM_KEYUP) == 1 && posted.size() == 1 &&
+              posted[0].lParam == reinterpret_cast<LPARAM>(activeLayout),
+              "Chinese variants and Japanese route with original layout");
+    }
+    for (const ULONG_PTR language : { 0x0409, 0x0412, 0 }) {
+        activeLayout = reinterpret_cast<HKL>(language);
+        posted.clear();
+        Check(Key(WM_KEYDOWN) == 0 && Key(WM_KEYUP) == 0 && posted.size() == 1 &&
+              posted[0].message == WM_CAPS_LOCK_PASSED &&
+              posted[0].wParam == kCapsPassedOtherLanguage, "other/unknown languages pass through");
+    }
+    foregroundThread = 0;
+    activeLayout = reinterpret_cast<HKL>(0x0411);
+    Check(Key(WM_KEYDOWN) == 0 && Key(WM_KEYUP) == 0, "missing testForeground thread never mapped");
+    ResetKeyboard();
+    activeLayout = reinterpret_cast<HKL>(0x0411);
+    Check(Key(WM_KEYDOWN) == 1, "Japanese down swallowed");
+    activeLayout = reinterpret_cast<HKL>(0x0409);
+    Check(Key(WM_KEYDOWN) == 1 && Key(WM_KEYUP) == 1 && posted.size() == 1,
+          "layout change during hold preserves pair and suppresses repeat");
+    Check(!SwitchInputMode(testForeground, reinterpret_cast<HKL>(posted[0].lParam)) && sentBatches.empty(),
+          "queued request is dropped after same-window language change");
+
+    struct ModeCase { bool open; DWORD conversion; InputMode current; WORD key; WORD modifier; };
+    const ModeCase cases[] = {
+        { false, IME_CMODE_NATIVE | IME_CMODE_KATAKANA, InputMode::English, VK_IME_ON, 0 },
+        { true, 0, InputMode::English, VK_IME_ON, 0 },
+        { true, IME_CMODE_FULLSHAPE, InputMode::English, VK_IME_ON, 0 },
+        { true, IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE, InputMode::Hiragana, VK_IME_ON, VK_SHIFT },
+        { true, IME_CMODE_NATIVE | IME_CMODE_KATAKANA | IME_CMODE_FULLSHAPE, InputMode::Katakana, VK_IME_OFF, 0 },
+        { true, IME_CMODE_NATIVE | IME_CMODE_KATAKANA, InputMode::Katakana, VK_IME_OFF, 0 },
+    };
+    for (const auto& item : cases) {
+        ResetKeyboard();
+        activeLayout = reinterpret_cast<HKL>(0x0411);
+        imeOpen = item.open;
+        imeConversion = item.conversion;
+        Check(GetInputMode(testForeground) == item.current, "real open/conversion bits determine Japanese mode");
+        Check(SwitchInputMode(testForeground, activeLayout), "Japanese mode request sent");
+        const auto& batch = sentBatches[0];
+        Check(batch.size() == (item.modifier ? 4u : 2u), "Japanese event count");
+        const size_t offset = item.modifier ? 1 : 0;
+        Check(batch[offset].ki.wVk == item.key && batch[offset].ki.dwFlags == 0 &&
+              batch[offset+1].ki.wVk == item.key && batch[offset+1].ki.dwFlags == KEYEVENTF_KEYUP,
+              "explicit ImeOn/ImeOff, never CapsLock or F6/F7/F10");
+        if (item.modifier) {
+            Check(batch.front().ki.wVk == VK_SHIFT && batch.back().ki.wVk == VK_SHIFT &&
+                  batch.back().ki.dwFlags == KEYEVENTF_KEYUP, "Katakana uses paired Shift");
+        }
+        const UINT count = static_cast<UINT>(batch.size());
+        for (UINT inserted = 0; inserted < count; ++inserted) {
+            sentBatches.clear();
+            firstSendCount = inserted;
+            Check(!SwitchInputMode(testForeground, activeLayout), "partial Japanese injection reports failure");
+            if (inserted != 0) {
+                Check(sentBatches.size() == 2, "partial Japanese injection releases synthetic keys");
+                for (const auto& release : sentBatches[1]) {
+                    Check(release.ki.dwFlags == KEYEVENTF_KEYUP, "Japanese cleanup only key-up");
+                }
+            }
+        }
+    }
+    for (int failure = 0; failure < 7; ++failure) {
+        ResetKeyboard();
+        activeLayout = reinterpret_cast<HKL>(0x0411);
+        if (failure == 0) { focusAvailable = false; }
+        if (failure == 1) { imeAvailable = false; }
+        if (failure == 2) { imeResponsive = false; }
+        if (failure == 3) { foregroundThread = 0; }
+        if (failure == 4) { imeConversion = static_cast<DWORD_PTR>(-1); }
+        if (failure == 5) { changeLayoutOnProbe = true; }
+        if (failure == 6) { imeKeyHeld = true; }
+        Check(!SwitchInputMode(testForeground, activeLayout) && sentBatches.empty(),
+              "missing/hung/changed IME never injects a guessed mode");
+    }
+    for (int modifier = 0; modifier < 4; ++modifier) {
+        ResetKeyboard(); activeLayout = reinterpret_cast<HKL>(0x0411);
+        ctrlHeld = modifier == 0; altHeld = modifier == 1; winHeld = modifier == 2; shiftHeld = modifier == 3;
+        Check(!SwitchInputMode(testForeground, activeLayout) && sentBatches.empty(),
+              "conflicting Japanese modifiers are not released or used for reconversion");
+    }
+    ResetKeyboard(); activeLayout = reinterpret_cast<HKL>(0x0411);
+    imeConversion = IME_CMODE_NATIVE;
+    shiftHeld = true;
+    Check(SwitchInputMode(testForeground, activeLayout) && sentBatches[0].size() == 2,
+          "Katakana preserves physical Shift without synthetic release");
+    ResetKeyboard();
+    Check(!SwitchInputMode(reinterpret_cast<HWND>(999), activeLayout) && sentBatches.empty(),
+          "testForeground change drops queued request");
+    std::puts("PASS: language dispatch, Japanese modes, failures and modifier ownership");
 }
 
 static void TestRendering() {
@@ -307,25 +452,37 @@ static void TestRendering() {
     struct BannerCase {
         BannerKind kind;
         bool state;
+        InputMode mode;
+        bool japanese;
         const wchar_t* text;
         COLORREF fill;
     };
     const BannerCase cases[] = {
-        { BannerKind::InputMethod, true, L"中文", kChineseColor },
-        { BannerKind::InputMethod, false, L"English", kEnglishColor },
-        { BannerKind::CapsLock, true, L"大写", kCapsLockColor },
-        { BannerKind::CapsLock, false, L"小写", kCapsLockLowerColor },
+        { BannerKind::InputMethod, true, InputMode::Chinese, false, L"中文", kChineseColor },
+        { BannerKind::InputMethod, false, InputMode::English, false, L"English", kEnglishColor },
+        { BannerKind::InputMethod, true, InputMode::Hiragana, true, L"あ", kJapaneseColor },
+        { BannerKind::InputMethod, true, InputMode::Katakana, true, L"ア", kKatakanaColor },
+        { BannerKind::InputMethod, false, InputMode::English, true, L"A", kEnglishColor },
+        { BannerKind::CapsLock, true, InputMode::Unknown, false, L"大写", kCapsLockColor },
+        { BannerKind::CapsLock, false, InputMode::Unknown, false, L"小写", kCapsLockLowerColor },
     };
     const int bannerWidth = 200;
     const int bannerHeight = 96;
     for (const BannerCase& item : cases) {
         g_bannerKind = item.kind;
         g_bannerState = item.state;
+        g_bannerInputMode = item.mode;
+        g_bannerJapanese = item.japanese;
         g_bannerText = item.text;
+        Check(BannerFill() == item.fill, "banner fill follows the language and mode");
         Check(RenderBanner(bannerWidth, bannerHeight, 96), "banner renders");
         const auto* pixels = static_cast<const DWORD*>(g_bannerBits);
         Check(pixels[0] == 0, "banner corner is transparent");
         Check((pixels[10 * bannerWidth + bannerWidth / 2] >> 24) == 255, "banner interior opaque");
+        // 文字居中，左中这一块一定是纯底色：黄底、红底、紫底都要对得上。
+        Check((pixels[48 * bannerWidth + 12] & 0x00FFFFFFu) ==
+              static_cast<DWORD>(GetRValue(item.fill) << 16 | GetGValue(item.fill) << 8 |
+                                 GetBValue(item.fill)),"banner interior keeps the fill colour");
         bool hasEdge = false;
         for (int i = 0; i < bannerWidth * bannerHeight; ++i) {
             const DWORD alpha = pixels[i] >> 24;
@@ -348,17 +505,47 @@ static void TestRendering() {
     g_bannerKind = BannerKind::CapsLock;
     g_bannerState = true;
     g_bannerText = L"大写";
-    ShowSwitchBanner();
+    ShowSwitchBanner(testForeground, activeLayout);
     Check(g_bannerKind == BannerKind::InputMethod, "switch banner resets the banner kind");
     ShowCapsLockBanner(true);
     Check(g_bannerKind == BannerKind::CapsLock && wcscmp(g_bannerText, L"大写") == 0 &&
-          g_bannerState, "caps banner shows 大写 when the caps lock is on");
+          g_bannerState && !g_bannerJapanese, "caps banner shows 大写 in white, never the Japanese yellow");
     ShowCapsLockBanner(false);
     Check(wcscmp(g_bannerText, L"小写") == 0 && !g_bannerState,
           "caps banner shows 小写 when the caps lock is off");
-    ShowSwitchBanner();
+    ShowSwitchBanner(testForeground, activeLayout);
     Check(g_bannerKind == BannerKind::InputMethod, "switch banner wins again after a caps banner");
+    activeLayout = reinterpret_cast<HKL>(0x0411);
+    imeOpen = true;
+    struct JapaneseBanner { DWORD conversion; InputMode mode; const wchar_t* text; COLORREF fill; };
+    const JapaneseBanner japanese[] = {
+        { 0, InputMode::English, L"A", kEnglishColor },
+        { IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE, InputMode::Hiragana, L"あ", kJapaneseColor },
+        { IME_CMODE_NATIVE | IME_CMODE_KATAKANA | IME_CMODE_FULLSHAPE, InputMode::Katakana, L"ア", kKatakanaColor },
+    };
+    for (const JapaneseBanner& item : japanese) {
+        imeConversion = item.conversion;
+        ShowSwitchBanner(testForeground, activeLayout);
+        ShowBannerNow();
+        Check(g_bannerJapanese && g_bannerInputMode == item.mode &&
+              wcscmp(g_bannerText, item.text) == 0 && BannerFill() == item.fill &&
+              (item.fill != kJapaneseColor || g_bannerInputMode != InputMode::English) &&
+              (item.fill != kKatakanaColor || g_bannerInputMode != InputMode::English),
+              "Japanese banner: A on blue for English, あ/ア on yellow, never the Chinese labels");
+    }
+    ShowSwitchBanner(testForeground, activeLayout);
+    ShowSwitchBanner(testForeground, activeLayout);
+    activeLayout = reinterpret_cast<HKL>(0x0804);
+    const auto previous = g_bannerInputMode;
+    ShowBannerNow();
+    Check(g_bannerInputMode == previous, "queued banner is dropped after layout changes");
+    imeConversion = IME_CMODE_NATIVE;
+    ShowSwitchBanner(testForeground, activeLayout);
+    ShowBannerNow();
+    Check(!g_bannerJapanese && wcscmp(g_bannerText, L"中文") == 0 && BannerFill() == kChineseColor,
+          "Chinese still uses the red banner with the 中文 label");
     g_bannerWnd = nullptr;
+    ResetKeyboard();
     StopGdiplus();
     std::puts("PASS: 20 splash decode and release cycles, banner colours and alpha");
 }
@@ -622,7 +809,7 @@ static void TestCursor() {
 
     setCursorCalls = 0;
     InitializeCursorTint();
-    Check(winEventHooks == 1, "a foreground hook is registered at startup");
+    Check(winEventHooks == 1, "a testForeground hook is registered at startup");
     Check(setCursorCalls == std::size(kSlots), "every cursor slot is tinted at startup");
 
     Check(lastCursorWidth == 72 && lastCursorHeight == 72,
@@ -635,27 +822,41 @@ static void TestCursor() {
     }
 
     setCursorCalls = 0;
-    ApplyTint(true);
+    ApplyTint(InputMode::Chinese);
     Check(setCursorCalls == std::size(kSlots), "switching to Chinese repaints every slot");
     Check(LooksTinted(lastCursorPixels, kChineseColor), "the slots now hold the Chinese colour");
 
     setCursorCalls = 0;
-    ApplyTint(true);
+    ApplyTint(InputMode::Chinese);
     Check(setCursorCalls == 0, "the same state does not repaint");
 
     setCursorCalls = 0;
-    ApplyTint(false);
+    ApplyTint(InputMode::English);
     Check(setCursorCalls == std::size(kSlots) && LooksTinted(lastCursorPixels, kEnglishColor),
           "switching back repaints in the English colour");
 
+    for (const auto mode : { InputMode::Hiragana, InputMode::Katakana, InputMode::English }) {
+        g_bannerKind = BannerKind::InputMethod;
+        g_bannerJapanese = true;
+        g_bannerInputMode = mode;
+        setCursorCalls = 0;
+        ApplyTint(mode);
+        Check(setCursorCalls == std::size(kSlots) && LooksTinted(lastCursorPixels, BannerFill()),
+              "Japanese pointer takes the banner background colour (yellow/orange kana, blue English)");
+    }
+    g_bannerJapanese = false;
     setCursorCalls = 0;
+    setCursorCalls = 0;
+    ApplyTint(InputMode::Unknown);
+    Check(setCursorCalls == 0 && g_applied == InputMode::English,
+          "unreadable mode preserves cursor rather than guessing");
     ApplyCursorTintSettings(true, 0);
     Check(setCursorCalls == std::size(kSlots), "0% puts the untouched cursors back");
-    Check(g_applied == Tint::None, "nothing stays applied at 0%");
+    Check(g_applied == InputMode::Unknown, "nothing stays applied at 0%");
     ApplyCursorTintSettings(true, 0);
     Check(setCursorCalls == std::size(kSlots), "the same 0% again does not touch the cursors");
     setCursorCalls = 0;
-    ApplyTint(true);
+    ApplyTint(InputMode::Chinese);
     Check(setCursorCalls == 0, "at 0% the system cursors are never touched");
 
     ApplyCursorTintSettings(true, 60);
@@ -664,7 +865,7 @@ static void TestCursor() {
     // 总开关：关掉立刻还原；关着时浓度再变也不碰系统光标；打开马上重新上色。
     setCursorCalls = 0;
     ApplyCursorTintSettings(false, 60);
-    Check(setCursorCalls == std::size(kSlots) && g_applied == Tint::None,
+    Check(setCursorCalls == std::size(kSlots) && g_applied == InputMode::Unknown,
           "turning the master switch off puts the originals back");
     setCursorCalls = 0;
     ApplyCursorTintSettings(false, 80);
@@ -680,7 +881,7 @@ static void TestCursor() {
     for (const int dpi : { 96, 192, 288, 144 }) {
         cursorDpi = dpi;
         setCursorCalls = 0;
-        ApplyTint(false);
+        ApplyTint(InputMode::English);
         Check(setCursorCalls == std::size(kSlots) && lastCursorWidth == MulDiv(48, dpi, 96),
               "moving between monitor DPIs rebuilds the cursor even without an IME change");
     }
@@ -690,14 +891,14 @@ static void TestCursor() {
 
     highContrast = true;
     setCursorCalls = 0;
-    ApplyTint(true);
-    Check(setCursorCalls == std::size(kSlots) && g_applied == Tint::None &&
+    ApplyTint(InputMode::Chinese);
+    Check(setCursorCalls == std::size(kSlots) && g_applied == InputMode::Unknown &&
               lastCursorPixels == nativePixels[1] && lastCursorWidth == 72 &&
               lastCursorX == 10 && lastCursorY == 14, "high contrast restores exact original cursor");
-    ApplyTint(false);
+    ApplyTint(InputMode::English);
     Check(setCursorCalls == std::size(kSlots), "high contrast does not keep replacing cursors");
     highContrast = false;
-    ApplyTint(true);
+    ApplyTint(InputMode::Chinese);
 
     DestroyCursorTint();
     setCursorCalls = 0;
@@ -705,7 +906,7 @@ static void TestCursor() {
     Check(setCursorCalls == 0, "repeated shutdown does not touch system cursors");
     Check(DeleteFileW(tempFile) != FALSE, "remove cursor fixture");
     Check(winEventUnhooks == 1, "shutting down twice releases the hook exactly once");
-    Check(g_applied == Tint::None, "shutdown does not leave a tint behind");
+    Check(g_applied == InputMode::Unknown, "shutdown does not leave a tint behind");
     std::puts("PASS: native cursor frames, pixel-exact alpha/packing, DPI, malformed files, tint lifecycle");
 }
 
@@ -800,6 +1001,7 @@ int main() {
     _RTC_SetErrorFunc(OnRuntimeCheckFailure);
     BuildPaths();  // 设置文件路径跟着 exe 走
     TestKeyboard();
+    TestJapanese();
     TestHookThread();
     TestRendering();
     TestCursor();

@@ -13,6 +13,13 @@ constexpr wchar_t kMainWindowClass[] = L"CapsLockSwitcherClass";
 // 中英文状态色：中央横幅和鼠标指针共用同一份，两边的颜色必须一致。
 constexpr COLORREF kChineseColor = RGB(0xFF, 0x1F, 0x45);  // #FF1F45
 constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
+// 日语假名两档的暖底色（横幅和鼠标指针共用，上面写黑字）：平假名黄、片假名橙。
+constexpr COLORREF kJapaneseColor = RGB(0xFF, 0xC9, 0x00);  // #FFC900
+constexpr COLORREF kKatakanaColor = RGB(0xFF, 0x8B, 0x31);  // #FF8B31
+// 与 InputMode 顺序一致：中文红、英文蓝（日语下的英文档也走这一格）、平假名黄、片假名橙。
+constexpr COLORREF kInputModeColors[] = {
+	kEnglishColor, kEnglishColor, kChineseColor, kJapaneseColor, kKatakanaColor
+};
 
 extern HINSTANCE g_hInst;
 extern HWND g_mainWnd;  // 隐藏的主窗口：钩子消息和定时器都投给它
@@ -36,6 +43,7 @@ extern std::atomic_int g_cursorTintPercent;
 
 // 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，不要占用。
 constexpr UINT WM_TRAYICON = WM_APP + 1;
+// wParam = 目标 HWND，lParam = 按下时的 HKL。
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
 constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
 // CapsLock 这次没被映射掉：只把这件事记进日志。wParam 是下面哪种情况，
@@ -43,7 +51,7 @@ constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
 constexpr UINT WM_CAPS_LOCK_PASSED = WM_APP + 4;
 constexpr WPARAM kCapsPassedMappingOff = 0;     // 映射总开关关着
 constexpr WPARAM kCapsPassedAlt = 1;            // 按着 Alt，放行给原来的大写锁定
-constexpr WPARAM kCapsPassedOtherLanguage = 2;  // 前台不是中文输入法，留给原键位
+constexpr WPARAM kCapsPassedOtherLanguage = 2;  // 前台不是中/日输入法，留给原键位
 
 // 主窗口上的定时器。
 constexpr UINT_PTR kTimerRetryStartup = 1;

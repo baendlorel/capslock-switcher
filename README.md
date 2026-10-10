@@ -1,11 +1,12 @@
 ﻿# CapsLock切换器 (CapsLock Switcher)
 
-将CapsLock键映射为Ctrl+Space的Windows工具，方便切换中英文输入法。
+Windows 输入模式切换工具：中文切换中/英，日语循环平假名/片假名/英文。
 
 ## 功能特性
 
-- ✅ 将CapsLock键映射为Ctrl+Space组合键；只有当前前台窗口挂着中文输入法时才接管，别的语言布局下
-  CapsLock 还是系统的大写锁定（以后要加日语平/片/英，就在这一个判断点上分流）
+- ✅ 中文输入法：CapsLock 发送 Ctrl+Space，保持原来的中/英切换
+- ✅ 日语输入法：CapsLock 循环 **平假名 → 全角片假名 → 半角英文 → 平假名**，每次按实际状态决定下一档
+- ✅ 其它语言不接管，CapsLock 原样放行；启用映射和 Alt+CapsLock 放行开关继续有效
 - ✅ 后台运行，无窗口界面
 - ✅ 系统托盘图标显示运行状态
 - ✅ 右键托盘图标可退出程序
@@ -15,12 +16,13 @@
 - ✅ 托盘图标创建失败时自动重试，不再直接退出
 - ✅ 设置页里可随时开启/关闭映射、`Alt+CapsLock` 放行、鼠标指针变色和开机启动；变色开着时
   用滑块调浓度。改动立刻写进 exe 旁边的 `capslock-switcher.ini`，下次启动照旧
-- ✅ 每次切换在屏幕中央闪出当前输入法状态：中文红底"中文"，英文蓝底"English"
-- ✅ 鼠标指针也跟着变色：中文红指针、英文蓝指针，和横幅同一个颜色。按 CapsLock 立刻变，
+- ✅ 每次切换在屏幕中央显示输入模式：中文红底"中文"、英文蓝底"English"；日语下字符换成
+  A / あ / ア，其中平假名 `#FFC900` 黄底、片假名 `#FF8B31` 橙底，都写**黑字**，英文那档仍是蓝底白字
+- ✅ 鼠标指针也跟着变色：中文红、平假名黄、片假名橙、英文蓝，和横幅底色是同一份颜色。按 CapsLock 立刻变，
   切换窗口也会跟着变（切到中文的窗口就变红，切回英文的窗口就变蓝），不按 CapsLock
   直接用 Ctrl+Space 或点任务栏切换也能在半秒内跟上
 - ✅ CapsLock 每按一下都往 `capslock-switcher.log` 写一行：切换输入法、`Alt+CapsLock` 放行
-  （还会记下结果是大写还是小写）、"映射已关闭"、非中文输入法下原样放行都能看出来（设置页上的
+  （还会记下结果是大写还是小写）、"映射已关闭"、非中/日输入法下原样放行都能看出来（设置页上的
   `打开日志文件` 能直接打开看）
 - ✅ 双击托盘图标（或右键菜单里的"设置..."）打开设置页：四个勾选项，鼠标颜色开关右边就是浓度滑块
 - ✅ `Alt+CapsLock` 触发原本的大写锁定（可以在设置页里关掉），放行时中央会闪一个紫色
@@ -37,21 +39,22 @@
    运行库，拷到哪台 Win10/11 x64 机器上双击就能跑（发版前改 `capslock-switcher/version.h` 那一行）
 3. 双击运行程序（设置页在主程序里：双击托盘图标，或右键菜单里的"设置..."）
 4. 程序会在系统托盘右下角显示图标
-5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），切换后屏幕中央会闪出当前的输入法
-   状态：中文红底"中文"，英文蓝底"English"，约0.5秒后淡出。状态是从前台窗口所在线程的
-   IME 窗口读的，读不到就沿用上一次的结果，宁可显示旧值也不闪一个错的。
-   **接管的前提是前台窗口挂着中文输入法**：切到纯英文等其它语言的布局之后，CapsLock 不再
-   切换、也不再被吞掉，就是原来的大写锁定键
+5. 中文输入法下按 CapsLock 发送 Ctrl+Space；日语输入法下每按一次循环
+   **平假名 → 全角片假名 → 半角英文 → 平假名**。英文仍属于日语输入法内部的模式，不切到英语布局。
+   横幅显示真实读到的模式：中文红、英文蓝，日语下字符是 A / あ / ア（平假名黄底、片假名橙底，
+  都是黑字）；鼠标指针始终和横幅同色（中文红、平假名黄、片假名橙、英文蓝）。
+   读不到状态时不猜测、不切换日语模式；横幅不显示新状态，指针保留已有颜色。
+   单独英语等其它语言布局不被接管。日语切换时请松开 Ctrl/Alt/Win 等修饰键，以免触发其它 IME 命令。
 6. 右键点击托盘图标打开菜单；双击托盘图标直接打开设置页（菜单里也有"设置..."）。
   开关都挪到设置页了：四个勾选项，鼠标颜色开关右边就是浓度滑块。
    勾选项和滑块改完立刻生效，也不会再弹提示气泡；失败原因只写进日志：
-   - `启用映射 (CapsLock -> Ctrl+Space)`：取消后 CapsLock 恢复成普通大写锁定键，
+   - `启用映射 (中文 / 日语)`：取消后 CapsLock 恢复成普通大写锁定键，
      程序仍在后台运行，随时可以再勾回来
    - `Alt+CapsLock = 原来的大写锁定`：勾上（默认）时 `Alt+CapsLock` 等于原来的大写锁定；
      取消后 Alt 不再特殊，`Alt+CapsLock` 和 CapsLock 一样照样切换输入法
    - `鼠标随语言变色`勾选框：总开关。取消勾选立刻把你的指针方案原样装回去，旁边
      的浓度滑块同时变灰、拖不动；再勾回来马上按原来的浓度重新上色，浓度值不会被清掉
-   - 颜色浓度滑块（`鼠标随语言变色` 右边）：100%（默认）就是完整的中文红/英文蓝，0% 相当于关掉，
+   - 颜色浓度滑块（`鼠标随语言变色` 右边）：100%（默认）就是完整的中文红/英文蓝，0% 相当于关掉，中间的数值
      按比例把红/蓝减淡。滑块点哪跳哪，按住还能接着拖（系统的默认行为是点一下只挪一页）。
 染的是箭头、文本 I 型、链接手型、十字、横向拉伸、纵向拉伸这六个
      系统指针；具体边界见下面的"注意事项"
@@ -104,23 +107,27 @@ CursorTintPercent=100
   `startup.cpp`，启动画面在 `splash.cpp`，设置页在 `settings.cpp`，日志在 `logging.cpp`，
   分层窗口和 DPI 辅助在 `surface.cpp`，鼠标指针在 `cursor.cpp`
 - 使用Windows低级键盘钩子（WH_KEYBOARD_LL）捕获CapsLock按键
-- 切换就是把 CapsLock 换成一次 `Ctrl+Space` 注入（`SendInput`）；注入不会松开用户仍按住的
-  Ctrl 或 Space，半途失败时还会把已经按下的合成键补一个抬起，不留"卡住"的修饰键。
-  改输入法状态的是被注入的那个快捷键，程序自己不去设置它
-- 屏幕中央的提示横幅要显示中文还是英文，读的是前台窗口所在线程的 IME 窗口：
-  `EnumThreadWindows` 按类名 `IME` 找到它（`ImmGetDefaultIMEWnd` 内部做的就是这件事），
-  再发 `WM_IME_CONTROL` + `IMC_GETCONVERSIONMODE`(0x0001)，用 `IME_CMODE_NATIVE` 位判断
-  中英文（中文模式实测为 0x401，英文为 0x0）。**全程没有链接 imm32**：消息本身在
-  `winuser.h` 里，那两个常量自己写一份就够了
+- 中文继续注入 `Ctrl+Space`；日语通过 `VK_IME_ON` 进入平假名、`Shift + VK_IME_ON` 进入全角片假名、
+  `VK_IME_OFF` 进入半角英文。两种语言共用按键注入和部分失败后的补抬逻辑，不合成 CapsLock，
+  不使用 F6/F7/F10 转换组合中的文字，不设置全局循环计数器，不改变罗马字/假名键盘输入偏好。
+  依据 Microsoft Learn 的 Keyboard Japan - ImeOn / ImeOff Implementation（见下方来源）；
+  面向支持这些原生键的微软日语 IME，不添加旧 IME 或第三方输入法的兼容分支。
+- 输入状态统一由 `keyboard.cpp` 的 `GetInputMode` 读取：`GetGUIThreadInfo` 找焦点控件，
+  `ImmGetDefaultIMEWnd` 取得默认 IME 窗口，再发带超时的 `WM_IME_CONTROL`。
+  日语先读 `IMC_GETOPENSTATUS`（0x0005），关闭就是英文；打开后读 `IMC_GETCONVERSIONMODE`（0x0001），
+  用 `IME_CMODE_NATIVE` 和 `IME_CMODE_KATAKANA` 区分三态。中文沿用原来的 NATIVE 位判断。
+  不再枚举线程内第一个名为 IME 的窗口；链接 Windows 自带的 imm32，没有新增随包 DLL。
 - 提示横幅在屏幕中央停留约 0.5 秒后淡出：中文红底 `#FF1F45`、英文蓝底 `#0073FF`、
-  大写紫底 `#9333EA`、小写用淡一半的紫 `#C999F4`，文字都是白的；圆角和逐像素 Alpha
+  日语假名暖底色，上面写黑字：平假名 `#FFC900` 黄、片假名 `#FF8B31` 橙（日语的英文档仍是 `#0073FF` 白字 `A`）、
+  大写紫底 `#9333EA`、
+  小写用淡一半的紫 `#C999F4`，除日语外文字都是白的；圆角和逐像素 Alpha
   的做法与启动画面相同（GDI+ 画形状、GDI 画字、最后补 Alpha 蒙版）
 - 鼠标指针变色（`cursor.cpp`）走的是 `SetSystemCursor`：把 `OCR_NORMAL`(32512)、
   `OCR_IBEAM`(32513)、`OCR_HAND`(32649)、`OCR_CROSS`(32515)、`OCR_SIZEWE`(32644)、
   `OCR_SIZENS`(32645) 六个槽换成我们自己造的 32bpp 带 Alpha 光标
   （热点从原光标继承过来，I 型的热点不在角上，丢了点击就不准；
   掩码按 Alpha 反推，免得在忽略 Alpha 的路径上画出一整块色块）。三个触发点：CapsLock
-  切换时（和横幅一样先等 50ms 让注入的 Ctrl+Space 生效）、`SetWinEventHook` 的
+  切换时（和横幅一样先等 50ms 让注入的模式键生效）、`SetWinEventHook` 的
   `EVENT_SYSTEM_FOREGROUND`（切窗口，同样去抖 50ms）、以及 500ms 一次的兜底轮询
   （覆盖同窗口内用 Ctrl+Space/Shift/点任务栏换输入法的情况，这种换法不产生前台事件）。
   染色强度由设置页的滑块给：先按上面的公式算出满色，再和用户原来的像素按百分比线性插值
@@ -153,16 +160,15 @@ CursorTintPercent=100
   （记在按键抬起时）就翻一次；别的程序注入的 CapsLock 也会跟着数，免得慢慢跑偏
 - 钩子运行在独立线程，回调只在每次 CapsLock 首次按下时投递 `PostMessage`，
   由主线程执行 `SendInput`；长按不会反复切换，耗时操作也不会阻塞钩子线程。
-  如果前台窗口已改变，则丢弃排队的切换请求
+  如果前台窗口或键盘布局已改变，则丢弃排队的切换请求
 - 进程在初始化时声明 **Per-Monitor V2 DPI 感知**（`SetProcessDpiAwarenessContext`），
   设置页是同一个进程里的 Win32 窗口，跟着进程一起走。窗口尺寸和字体都按它所在显示器的
   DPI 缩放，`WM_DPICHANGED` 里换字体并按系统给的位置重排，拖到别的显示器不会发虚。
 - `Alt+CapsLock`：以 CapsLock 首次按下时的 Alt 状态决定是否放行，并保持到该键抬起；
   中途松开 Alt 或改变映射开关，都不会拆散按下/抬起事件
-- 只有中文输入法下才接管 CapsLock：判的是前台线程键盘布局语言 ID 的 `PRIMARYLANGID` 是不是
-  `LANG_CHINESE`，不比对语言名字符串（名字跟着系统显示语言走，"中文(简体)"/"Chinese (Simplified)"
-  两种情况都算中文）。`keyboard.cpp` 里的 `ForegroundIsChineseInput()` 就是以后加日语
-  （平/片/英）之类语言的唯一分流点；现在非中文一律原样放行
+- 语言分流直接按前台线程键盘布局的 `PRIMARYLANGID` 判 `LANG_CHINESE` / `LANG_JAPANESE`，
+  不依赖本地化名字。首次按下时记录目标窗口及完整 HKL，重复键和抬起保持同一决策；
+  主线程在 IME 查询前后复核窗口和布局，过期请求直接丢弃。
 - 启动画面 `umbral-keys.png` 以 RCDATA 资源嵌进 exe（见 `capslock-switcher.rc`），
   用 GDI+ 解码后画进一张**预乘 Alpha（PARGB）**的 DIB，再交给 `UpdateLayeredWindow`
   ——所以它是真正的逐像素透明，键帽边缘不会出现黑框。
@@ -241,9 +247,9 @@ capslock-switcher/
 ├── capslock-switcher/
 │   ├── main.cpp                    # 进程外壳：单实例、隐藏主窗口、消息循环
 │   ├── app.h                       # 共享状态与跨模块入口
-│   ├── keyboard.cpp / keyboard.h   # 键盘钩子与 Ctrl+Space 注入
-│   ├── banner.cpp / banner.h       # 切换提示横幅（屏幕中央的中/英文）
-│   ├── cursor.cpp / cursor.h       # 鼠标指针跟着中英文变色
+│   ├── keyboard.cpp / keyboard.h   # 键盘钩子、输入状态读取与中/日模式切换
+│   ├── banner.cpp / banner.h       # 切换提示横幅（中/日文模式，日语假名黄底黑字）
+│   ├── cursor.cpp / cursor.h       # 鼠标指针跟着输入模式变色（和横幅同色）
 │   ├── tray.cpp / tray.h           # 托盘图标与右键菜单
 │   ├── startup.cpp / startup.h     # 开机启动（计划任务 + 提权副本）
 │   ├── splash.cpp / splash.h       # 启动画面
@@ -273,3 +279,15 @@ capslock-switcher/
 临时替换真实的箭头、I 型、手型、十字、横竖拉伸六个指针，检查中英文两色在 100%、60%、5% 时写入系统槽后的
 像素、Alpha、尺寸、热点，以及退出还原结果；不写注册表，完成后按当前方案原图还原。
 建议在 150% 等非整数缩放下运行，以抓住普通位图提交造成的二次缩放。
+
+### 日语实现来源
+
+Microsoft Learn：Keyboard Japan - ImeOn / ImeOff Implementation
+
+```text
+https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/keyboard-japan-ime
+```
+
+普通回归覆盖语言分流、日语各状态、按键配对、布局改变、IME 超时/缺失、修饰键冲突和部分注入失败；
+实机已在本机日语 IME 的独立编辑窗口中验证两轮三态循环，并另用后台进程验证跨进程读取和切换。
+第三方日语 IME 尚未实测。

@@ -2,6 +2,7 @@
 
 #include "app.h"
 #include "logging.h"
+#include "keyboard.h"
 #include "surface.h"
 
 #include <gdiplus.h>
@@ -22,24 +23,20 @@ constexpr UINT kBannerFadeStepMs = 16;
 constexpr UINT_PTR kTimerBannerFade = 1;
 constexpr UINT_PTR kTimerSwitchSettle = 2;
 
-// 注入的 Ctrl+Space 要先被目标窗口处理掉，不然读到的还是切换前的旧状态。
+// 注入的模式切换键要先被目标窗口处理掉，不然读到的还是切换前的旧状态。
 constexpr UINT kSwitchSettleMs = 50;
 
-// 中文红底、英文蓝底（这两个跟鼠标指针共用，在 app.h 里）、大写锁定紫底，文字都是白的。
+// 大写锁定的紫底：大写用正紫，小写兑一半白，一眼能分出大小写（这两种都是白字）。
 constexpr COLORREF kCapsLockColor = RGB(0x93, 0x33, 0xEA);       // #9333EA
-// 小写用淡一半的紫（就是上面那个紫往白里兑 50%），一眼能和大写区分开。
 constexpr COLORREF kCapsLockLowerColor = RGB(0xC9, 0x99, 0xF4);  // #C999F4
+// 日语横幅的字符，按 InputMode 排列；未知和中文在这儿用不到（日语布局下不会出现）。
+constexpr const wchar_t* kJapaneseText[] = { L"", L"A", L"", L"あ", L"ア" };
 
-// 横幅要显示哪一种：输入法的中/英，还是大写锁定的大写/小写。
+// 横幅要显示哪一种：输入模式，还是大写锁定的大写/小写。
 enum class BannerKind {
 	InputMethod,
 	CapsLock,
 };
-
-// WM_IME_CONTROL 的消息本身在 winuser.h 里；这两个常量定义在 immdev.h 里，
-// 直接写出来就不用链接 imm32 了。
-constexpr WPARAM kImeGetConversionMode = 0x0001;  // IMC_GETCONVERSIONMODE
-constexpr DWORD_PTR kImeCmodeNative = 0x0001;     // IME_CMODE_NATIVE
 
 HWND g_bannerWnd = nullptr;
 HBITMAP g_bannerBitmap = nullptr;
@@ -50,38 +47,21 @@ int g_bannerHeight = 0;
 int g_bannerAlpha = 0;
 UINT g_bannerHoldTicks = 0;
 BannerKind g_bannerKind = BannerKind::InputMethod;
-// 输入法横幅：是不是中文；大写锁定横幅：是不是大写。
+// 大写锁定横幅：是不是大写。输入法横幅改用下方 InputMode。
 bool g_bannerState = false;
 const wchar_t* g_bannerText = L"";
-// 上一次成功读到的状态：读不到时沿用，免得闪出一个错的中英文。
-bool g_lastKnownChinese = false;
-
-BOOL CALLBACK FindImeWindow(HWND wnd, LPARAM param) {
-	wchar_t cls[64] = {};
-	if (GetClassNameW(wnd, cls, _countof(cls)) != 0 && wcscmp(cls, L"IME") == 0) {
-		*reinterpret_cast<HWND*>(param) = wnd;
-		return FALSE;
-	}
-	return TRUE;
-}
-
-// 前台窗口所在线程的 IME 窗口。ImmGetDefaultIMEWnd 做的就是这件事，但那要 imm32。
-HWND DefaultImeWindow(const HWND foreground) {
-	const DWORD thread = GetWindowThreadProcessId(foreground, nullptr);
-	if (thread == 0) {
-		return nullptr;
-	}
-	HWND found = nullptr;
-	EnumThreadWindows(thread, FindImeWindow, reinterpret_cast<LPARAM>(&found));
-	return found;
-}
+InputMode g_bannerInputMode = InputMode::Unknown;
+// 日语输入法横幅：字符换成 kJapaneseText 里那三个（A / あ / ア），底色仍按模式取。
+bool g_bannerJapanese = false;
+HWND g_switchTarget = nullptr;
+HKL g_switchLayout = nullptr;
 
 // 这次横幅该用什么底色。
 COLORREF BannerFill() {
 	if (g_bannerKind == BannerKind::CapsLock) {
 		return g_bannerState ? kCapsLockColor : kCapsLockLowerColor;
 	}
-	return g_bannerState ? kChineseColor : kEnglishColor;
+	return kInputModeColors[static_cast<int>(g_bannerInputMode)];
 }
 
 // 一个像素被圆角矩形盖住的比例，按 4x4 子采样算。
@@ -193,7 +173,9 @@ bool RenderBanner(const int width, const int height, const int dpi) {
 		const HGDIOBJ previous = SelectObject(
 		    g_bannerMemDc, font != nullptr ? font : GetStockObject(DEFAULT_GUI_FONT));
 		SetBkMode(g_bannerMemDc, TRANSPARENT);
-		SetTextColor(g_bannerMemDc, RGB(245, 245, 245));
+		// 平/片假名那两块暖底色上写黑字，红/蓝/紫底都是白字。
+		SetTextColor(g_bannerMemDc, fill == kJapaneseColor || fill == kKatakanaColor
+		                                ? RGB(0, 0, 0) : RGB(245, 245, 245));
 		RECT textArea = { 0, 0, g_bannerWidth, g_bannerHeight };
 		DrawTextW(g_bannerMemDc, g_bannerText, -1, &textArea,
 		          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -213,8 +195,18 @@ void ShowBannerNow() {
 		return;
 	}
 	if (g_bannerKind == BannerKind::InputMethod) {
-		g_bannerState = CurrentInputIsChinese();
-		g_bannerText = g_bannerState ? L"中文" : L"English";
+		const DWORD thread = GetWindowThreadProcessId(g_switchTarget, nullptr);
+		if (thread == 0 || g_switchTarget != GetForegroundWindow() ||
+		    g_switchLayout != GetKeyboardLayout(thread)) {
+			return;
+		}
+		g_bannerJapanese = PRIMARYLANGID(LOWORD(g_switchLayout)) == LANG_JAPANESE;
+		g_bannerInputMode = GetInputMode(g_switchTarget);
+		if (g_bannerInputMode == InputMode::Unknown) {
+			return;  // 读不到不猜测，更不能把请求的模式冒充实际状态
+		}
+		const int mode = static_cast<int>(g_bannerInputMode);
+		g_bannerText = g_bannerJapanese ? kJapaneseText[mode] : kInputModeNames[mode];
 	} else {
 		g_bannerText = g_bannerState ? L"大写" : L"小写";
 	}
@@ -267,26 +259,6 @@ LRESULT CALLBACK BannerProc(const HWND hwnd, const UINT message, const WPARAM wP
 
 }  // 匿名命名空间
 
-// 前台线程的输入法是不是停在中文（native）模式。放在匿名命名空间外面：
-// 鼠标指针那边（cursor.cpp）要用同一个判断，不能各读各的。
-bool CurrentInputIsChinese(const DWORD timeoutMs) {
-	const HWND foreground = GetForegroundWindow();
-	if (foreground == nullptr) {
-		return g_lastKnownChinese;
-	}
-	const HWND imeWnd = DefaultImeWindow(foreground);
-	if (imeWnd == nullptr) {
-		return g_lastKnownChinese;
-	}
-	DWORD_PTR mode = 0;
-	if (SendMessageTimeoutW(imeWnd, WM_IME_CONTROL, kImeGetConversionMode, 0,
-	                        SMTO_ABORTIFHUNG | SMTO_BLOCK, timeoutMs, &mode) == 0) {
-		return g_lastKnownChinese;
-	}
-	g_lastKnownChinese = (mode & kImeCmodeNative) != 0;
-	return g_lastKnownChinese;
-}
-
 void CreateBannerWindow(const HINSTANCE instance) {
 	WNDCLASSEX wcex = {};
 	wcex.cbSize = sizeof(WNDCLASSEX);
@@ -300,13 +272,15 @@ void CreateBannerWindow(const HINSTANCE instance) {
 	    kBannerClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
 }
 
-void ShowSwitchBanner() {
+void ShowSwitchBanner(const HWND target, const HKL layout) {
 	if (g_bannerWnd == nullptr) {
 		return;
 	}
 	// 这次要显示的是输入法，必须先把类型改回来：不改的话会沿用上一次
 	// （比如 Alt+CapsLock）的类型，切换中英文就只会显示"大写/小写"。
 	g_bannerKind = BannerKind::InputMethod;
+	g_switchTarget = target;
+	g_switchLayout = layout;
 	// 等注入的快捷键先生效，再读状态。
 	SetTimer(g_bannerWnd, kTimerSwitchSettle, kSwitchSettleMs, nullptr);
 }
@@ -317,6 +291,7 @@ void ShowCapsLockBanner(const bool upper) {
 	}
 	KillTimer(g_bannerWnd, kTimerSwitchSettle);  // 排队中的输入法横幅作废：这次要显示的是大写锁定
 	g_bannerKind = BannerKind::CapsLock;
+	g_bannerJapanese = false;  // 大写横幅不用日语字符表
 	g_bannerState = upper;
 	ShowBannerNow();
 }

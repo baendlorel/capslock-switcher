@@ -12,7 +12,7 @@ HINSTANCE g_hInst = nullptr;
 HWND g_mainWnd = nullptr;
 std::atomic_bool g_cursorTintEnabled{ true };
 std::atomic_int g_cursorTintPercent{ 100 };
-bool CurrentInputIsChinese(DWORD) { return false; }
+InputMode GetInputMode(HWND, DWORD) { return InputMode::English; }
 void ShowBalloon(const wchar_t*) {}
 void Log(const wchar_t*, ...) {}
 void SaveSettings() {}  // 这个探针不改设置文件
@@ -27,8 +27,8 @@ int main() {
     for (const int percent : { 100, 60, 5 }) {
         g_cursorTintPercent = percent;
         for (const bool chinese : { false, true }) {
-            g_applied = Tint::None;
-            ApplyTint(chinese);
+            g_applied = InputMode::Unknown;
+            ApplyTint(chinese ? InputMode::Chinese : InputMode::English);
             for (size_t i = 0; i < std::size(kSlots); ++i) {
                 const auto& source = g_sources[i];
                 auto expected = source.pixels;

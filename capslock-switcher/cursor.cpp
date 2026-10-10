@@ -1,7 +1,7 @@
 ﻿#include "cursor.h"
 
 #include "app.h"
-#include "banner.h"
+#include "keyboard.h"
 #include "logging.h"
 #include "surface.h"
 
@@ -14,8 +14,7 @@ namespace {
 
 // 染哪些光标槽：槽号 + 注册表 Control Panel\Cursors 下的值名。等待/后台等待是 .ani
 // 动画光标，换成静止的一帧看着像卡死，不碰。winuser.h 里 OCR_* 被 OEMRESOURCE 包着、
-// IDC_* 又是 MAKEINTRESOURCE 指针，所以槽号直接写数字（和 banner.cpp 里手写
-// IMC_GETCONVERSIONMODE 是同一个做法）。
+// IDC_* 又是 MAKEINTRESOURCE 指针，所以槽号直接写数字。
 struct CursorSlot {
 	DWORD id;
 	const wchar_t* name;
@@ -46,15 +45,9 @@ struct CursorSource {
 	std::vector<DWORD> pixels;  // premultiplied alpha，自顶向下，0xAARRGGBB
 };
 
-enum class Tint {
-	None,
-	Chinese,
-	English,
-};
-
 CursorSource g_sources[std::size(kSlots)];
-Tint g_applied = Tint::None;  // 系统光标槽现在被染成什么样
-Tint g_target = Tint::None;   // 想要的颜色，重刷时直接用，不用再探测
+InputMode g_applied = InputMode::Unknown;  // 系统光标槽现在被染成什么样
+InputMode g_target = InputMode::Unknown;   // 想要的颜色，重刷时直接用，不用再探测
 HWINEVENTHOOK g_foregroundHook = nullptr;
 ULONGLONG g_lastProbeTick = 0;
 unsigned g_pollTicks = 0;
@@ -390,7 +383,7 @@ void RestoreSourceCursors() {
 			DestroyCursor(cursor);
 		}
 	}
-	g_applied = Tint::None;
+	g_applied = InputMode::Unknown;
 }
 
 // 物理尺寸 = 用户的基础指针大小 × 鼠标所在显示器的 DPI，绝不是 SM_CXCURSOR。
@@ -417,16 +410,16 @@ void RebuildSources(const int dpi) {
 		}
 	}
 	g_sourceDpi = dpi;
-	g_applied = Tint::None;
+	g_applied = InputMode::Unknown;
 }
 
-void ApplyTint(const bool chinese) {
-	g_target = chinese ? Tint::Chinese : Tint::English;
-	if (!TintOn()) {
+void ApplyTint(const InputMode mode) {
+	if (!TintOn() || mode == InputMode::Unknown) {
 		return;
 	}
+	g_target = mode;
 	if (HighContrastOn()) {
-		if (g_applied != Tint::None) {
+		if (g_applied != InputMode::Unknown) {
 			RestoreSourceCursors();
 		}
 		return;
@@ -440,7 +433,7 @@ void ApplyTint(const bool chinese) {
 	if (g_applied == g_target) {
 		return;
 	}
-	const COLORREF color = chinese ? kChineseColor : kEnglishColor;
+	const COLORREF color = kInputModeColors[static_cast<int>(mode)];
 	bool applied = false;
 	for (size_t i = 0; i < std::size(kSlots); ++i) {
 		if (!g_sources[i].ready) {
@@ -486,7 +479,7 @@ void InitializeCursorTint() {
 	if (g_mainWnd != nullptr) {
 		SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
 	}
-	ApplyTint(CurrentInputIsChinese());
+	ApplyTint(GetInputMode(GetForegroundWindow()));
 }
 
 void CursorSwitchSettle() {
@@ -504,7 +497,7 @@ void CursorSettleTick() {
 		return;
 	}
 	g_lastProbeTick = GetTickCount64();
-	ApplyTint(CurrentInputIsChinese());
+	ApplyTint(GetInputMode(GetForegroundWindow()));
 }
 
 void CursorPollTick() {
@@ -512,13 +505,13 @@ void CursorPollTick() {
 		return;
 	}
 	if (++g_pollTicks % kReapplyTicks == 0) {
-		g_applied = Tint::None;  // Windows 可能自行重载方案，定期补上颜色
+		g_applied = InputMode::Unknown;  // Windows 可能自行重载方案，定期补上颜色
 	}
 	if (GetTickCount64() - g_lastProbeTick < kPollMs) {
 		return;  // 刚刚探测过（CapsLock 或切窗口那条路），不重复问
 	}
 	g_lastProbeTick = GetTickCount64();
-	ApplyTint(CurrentInputIsChinese(kProbeTimeoutMs));
+	ApplyTint(GetInputMode(GetForegroundWindow(), kProbeTimeoutMs));
 }
 
 void OnSystemCursorsChanged() {
@@ -526,8 +519,8 @@ void OnSystemCursorsChanged() {
 		return;
 	}
 	g_sourceDpi = 0;  // 用户换方案/大小后直接读新文件，不拿旧像素覆盖新方案
-	g_applied = Tint::None;
-	ApplyTint(g_target == Tint::Chinese);
+	g_applied = InputMode::Unknown;
+	ApplyTint(g_target);
 }
 
 void DestroyCursorTint() {
@@ -540,13 +533,13 @@ void DestroyCursorTint() {
 		KillTimer(g_mainWnd, kTimerCursorPoll);
 	}
 	// 只有真染过才去动系统光标：没染过就别白写一遍。
-	if (g_applied != Tint::None) {
+	if (g_applied != InputMode::Unknown) {
 		RestoreSourceCursors();
 	}
 	for (CursorSource& source : g_sources) {
 		source = CursorSource{};
 	}
-	g_target = Tint::None;
+	g_target = InputMode::Unknown;
 	g_pollTicks = 0;
 	g_sourceDpi = 0;
 }
@@ -572,8 +565,8 @@ void SyncCursorTint(const bool wasOn) {
 		g_lastProbeTick = GetTickCount64();
 	}
 	// 开关或浓度变了，槽里贴着的旧颜色就不作数了，重刷一遍。
-	g_applied = Tint::None;
-	ApplyTint(CurrentInputIsChinese());
+	g_applied = InputMode::Unknown;
+	ApplyTint(GetInputMode(GetForegroundWindow()));
 }
 
 // 设置界面在别的进程里，它改完 ini 会通知主窗口，主窗口再调这里。

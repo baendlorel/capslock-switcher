@@ -123,7 +123,7 @@ void CreateControls(const HWND wnd) {
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkStartup)), g_hInst, nullptr);
 	g_chkMapping = CreateWindowExW(
-	    0, L"BUTTON", L"启用映射 (CapsLock -> Ctrl+Space)",
+	    0, L"BUTTON", L"启用映射 (中文 / 日语)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkMapping)), g_hInst, nullptr);
 	g_chkAlt = CreateWindowExW(
