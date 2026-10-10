@@ -39,7 +39,7 @@ namespace {
 constexpr wchar_t kWindowTitle[] = L"CapsLock Switcher 设置";
 constexpr wchar_t kLogFileName[] = L"capslock-switcher.log";
 constexpr wchar_t kMainExeName[] = L"capslock-switcher.exe";
-constexpr int kLogLines = 400;
+constexpr int kLogLines = 10;
 constexpr UINT kSaveDelayMs = 250;     // 拖滑块时攒一下再写盘
 constexpr UINT kRefreshMs = 1000;      // 日志刷新
 constexpr ULONGLONG kStartupSettleMs = 20000;  // 等提权副本把任务改完
@@ -140,7 +140,10 @@ std::wstring ReadLogTail() {
 	MultiByteToWideChar(CP_UTF8, 0, bytes.data() + begin,
 	                    static_cast<int>(bytes.size() - begin), text.data(), chars);
 
-	// 只留最后 kLogLines 行，窗口里不至于越来越沉。
+	// 末尾那个换行会多算一行，先去掉；然后只留最后 kLogLines 行，窗口里不至于越来越沉。
+	while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) {
+		text.pop_back();
+	}
 	int lines = 0;
 	size_t start = text.size();
 	while (start > 0 && lines < kLogLines) {
@@ -206,26 +209,18 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
 		root.Children().Append(title);
 
-		TextBlock hint;
-		hint.Text(L"改完立刻生效，不用重启。");
-		hint.Opacity(0.7);
-		root.Children().Append(hint);
-
-		m_mapping.Header(box_value(L"启用映射 (CapsLock -> Ctrl+Space)"));
-		m_mapping.OnContent(box_value(L"开"));
-		m_mapping.OffContent(box_value(L"关"));
+		m_mapping.OnContent(box_value(L"启用映射 (CapsLock -> Ctrl+Space)"));
+		m_mapping.OffContent(box_value(L"启用映射 (CapsLock -> Ctrl+Space)"));
 		m_mapping.Toggled([this](auto&&, auto&&) { SaveFromControls(); });
 		root.Children().Append(m_mapping);
 
-		m_alt.Header(box_value(L"Alt+CapsLock = 原来的大写锁定"));
-		m_alt.OnContent(box_value(L"开"));
-		m_alt.OffContent(box_value(L"关"));
+		m_alt.OnContent(box_value(L"Alt+CapsLock = 原来的大写锁定"));
+		m_alt.OffContent(box_value(L"Alt+CapsLock = 原来的大写锁定"));
 		m_alt.Toggled([this](auto&&, auto&&) { SaveFromControls(); });
 		root.Children().Append(m_alt);
 
-		m_cursor.Header(box_value(L"鼠标指针跟着中英文变色"));
-		m_cursor.OnContent(box_value(L"开"));
-		m_cursor.OffContent(box_value(L"关"));
+		m_cursor.OnContent(box_value(L"鼠标指针跟着中英文变色"));
+		m_cursor.OffContent(box_value(L"鼠标指针跟着中英文变色"));
 		m_cursor.Toggled([this](auto&&, auto&&) {
 			m_percent.IsEnabled(m_cursor.IsOn());  // 关掉时滑块变灰、点不动
 			SaveFromControls();
@@ -249,9 +244,8 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		percentRow.Children().Append(m_percent);
 		root.Children().Append(percentRow);
 
-		m_startup.Header(box_value(L"开机启动 (管理员)"));
-		m_startup.OnContent(box_value(L"开"));
-		m_startup.OffContent(box_value(L"关"));
+		m_startup.OnContent(box_value(L"开机启动 (管理员)"));
+		m_startup.OffContent(box_value(L"开机启动 (管理员)"));
 		m_startup.Toggled([this](auto&&, auto&&) {
 			if (m_loading) {
 				return;
@@ -266,7 +260,9 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		logHeader.Orientation(Orientation::Horizontal);
 		logHeader.Spacing(12);
 		TextBlock logTitle;
-		logTitle.Text(L"日志（最后 400 行）");
+		wchar_t logLabel[64] = {};
+		swprintf_s(logLabel, L"日志（最后 %d 行）", kLogLines);
+		logTitle.Text(logLabel);
 		logTitle.VerticalAlignment(VerticalAlignment::Center);
 		logHeader.Children().Append(logTitle);
 		Button openLog;
@@ -283,7 +279,7 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		m_log.TextWrapping(TextWrapping::NoWrap);
 		m_log.FontFamily(FontFamily(L"Consolas"));
 		m_log.FontSize(12);
-		m_log.Height(300);
+		m_log.Height(190); 
 		m_log.VerticalAlignment(VerticalAlignment::Stretch);
 		ScrollViewer::SetVerticalScrollBarVisibility(m_log, ScrollBarVisibility::Auto);
 		root.Children().Append(m_log);

@@ -360,9 +360,9 @@ bool DecodeCursor(const wchar_t* path, const int size, CursorSource& out) {
 	if (!ok) {
 		return false;
 	}
-	Log(L"cursor: 原生帧 %ux%u -> %dx%d，热点 (%lu,%lu)，%s",
-	    best.width == 0 ? 256 : best.width, best.height == 0 ? 256 : best.height,
-	    out.width, out.height, info.xHotspot, info.yHotspot, path);
+	//Log(L"cursor: 原生帧 %ux%u -> %dx%d，热点 (%lu,%lu)，%s",
+	//    best.width == 0 ? 256 : best.width, best.height == 0 ? 256 : best.height,
+	//    out.width, out.height, info.xHotspot, info.yHotspot, path);
 	out.xHotspot = info.xHotspot;
 	out.yHotspot = info.yHotspot;
 	out.darkInk = DetectDarkInk(out.pixels, out.width, out.height);
