@@ -4,7 +4,6 @@
 #include "logging.h"
 #include "resource.h"
 #include "settings.h"
-#include "version.h"
 
 #include <cstdio>
 #include <string>
@@ -111,7 +110,7 @@ void ShowBalloon(const wchar_t* text) {
 }
 
 
-// 右键菜单：开关都在设置页里，这里只留版本号、打开设置和退出。
+// 右键菜单：开关都在设置页里，这里只留当前输入法、打开设置和退出。
 void ShowTrayMenu(const HWND hwnd) {
 	POINT pt;
 	GetCursorPos(&pt);
@@ -120,11 +119,6 @@ void ShowTrayMenu(const HWND hwnd) {
 	if (hMenu == nullptr) {
 		return;
 	}
-
-	wchar_t versionText[64] = {};
-	swprintf_s(versionText, L"CapsLock Switcher v%hs", APP_VERSION);
-	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, versionText);
-	AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 
 	std::wstring imeText = L"\u5F53\u524D\u8F93\u5165\u6CD5\uFF1A" + GetCurrentInputMethodName();
 	AppendMenuW(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, imeText.c_str());

@@ -3,6 +3,7 @@
 #include "app.h"
 #include "config.h"
 #include "logging.h"
+#include "version.h"
 #include "resource.h"
 #include "surface.h"
 
@@ -17,7 +18,6 @@
 namespace {
 
 constexpr wchar_t kSettingsClass[] = L"CapsLockSwitcherSettings";
-constexpr wchar_t kSettingsTitle[] = L"CapsLock Switcher 设置";
 
 // 控件 ID。
 constexpr int kIdChkMapping = 101;
@@ -213,6 +213,10 @@ void CreateControls(const HWND wnd) {
 	};
 	InitCommonControlsEx(&commonControls);
 
+	g_chkStartup = CreateWindowExW(
+	    0, L"BUTTON", L"开机启动 (管理员)",
+	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
+	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkStartup)), g_hInst, nullptr);
 	g_chkMapping = CreateWindowExW(
 	    0, L"BUTTON", L"启用映射 (CapsLock -> Ctrl+Space)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
@@ -222,7 +226,7 @@ void CreateControls(const HWND wnd) {
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkAlt)), g_hInst, nullptr);
 	g_chkCursorTint = CreateWindowExW(
-	    0, L"BUTTON", L"鼠标指针跟着中英文变色 (中文红 / 英文蓝)",
+	    0, L"BUTTON", L"鼠标随语言变色",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkCursorTint)), g_hInst, nullptr);
 	g_txtCursor = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, wnd,
@@ -236,10 +240,6 @@ void CreateControls(const HWND wnd) {
 	SendMessageW(g_sldCursor, TBM_SETPAGESIZE, 0, 10);
 	SendMessageW(g_sldCursor, TBM_SETPOS, TRUE, g_cursorTintPercent.load());
 	SetWindowSubclass(g_sldCursor, SliderProc, 0, 0);
-	g_chkStartup = CreateWindowExW(
-	    0, L"BUTTON", L"开机启动 (管理员)",
-	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
-	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkStartup)), g_hInst, nullptr);
 	g_btnOpenLog = CreateWindowExW(
 	    0, L"BUTTON", L"打开日志文件",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, wnd,
@@ -267,6 +267,8 @@ void LayoutChildren(const HWND wnd) {
 	const int inner = client.right - client.left - margin * 2;
 
 	int y = margin;
+	MoveWindow(g_chkStartup, margin, y, inner, row, TRUE);
+	y += row;
 	MoveWindow(g_chkMapping, margin, y, inner, row, TRUE);
 	y += row;
 	MoveWindow(g_chkAlt, margin, y, inner, row, TRUE);
@@ -276,9 +278,7 @@ void LayoutChildren(const HWND wnd) {
 	MoveWindow(g_txtCursor, margin, y, inner, row, TRUE);
 	y += row;
 	MoveWindow(g_sldCursor, margin, y, inner, sliderH, TRUE);
-	y += sliderH;
-	MoveWindow(g_chkStartup, margin, y, inner, row, TRUE);
-	y += row + gap;
+	y += sliderH + gap;
 	MoveWindow(g_btnOpenLog, margin, y, buttonW, buttonH, TRUE);
 	y += buttonH + gap;
 	MoveWindow(g_logView, margin, y, inner, client.bottom - margin - y, TRUE);
@@ -471,8 +471,11 @@ void OpenSettingsWindow() {
 			Log(L"settings: RegisterClassEx failed (%lu)", GetLastError());
 			return;
 		}
+		// 标题栏里带上版本号，一眼能看出跑的是哪一版。
+		wchar_t title[64] = {};
+		swprintf_s(title, L"CapsLock Switcher 设置 v%hs", APP_VERSION);
 		const int dpi = ScreenDpi();
-		g_wnd = CreateWindowExW(0, kSettingsClass, kSettingsTitle, WS_OVERLAPPEDWINDOW,
+		g_wnd = CreateWindowExW(0, kSettingsClass, title, WS_OVERLAPPEDWINDOW,
 		                        CW_USEDEFAULT, 0, MulDiv(620, dpi, 96), MulDiv(460, dpi, 96),
 		                        nullptr, nullptr, g_hInst, nullptr);
 		if (g_wnd == nullptr) {

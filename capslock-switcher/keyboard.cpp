@@ -18,8 +18,16 @@ bool g_capsSwallowed = false;
 // 大写锁定的开关状态。钩子看得见每一次 CapsLock 的抬起，所以"放行一次就翻一次"，
 // 比去问系统的开关位可靠：那个位只在有焦点的线程输入队列里更新，本程序没有焦点。
 bool g_capsLockOn = false;
-// 本次物理按下走的是哪条路：true = 按着 Alt 放行（日志和提示文字要用）。
-bool g_capsPassedAsAlt = false;
+// 没被映射掉时，抬起那一刻上报给主线程的原因（见 app.h 的 kCapsPassed*）。
+WPARAM g_capsPassReason = kCapsPassedMappingOff;
+
+// 前台窗口所在线程现在挂的是不是中文输入法。判语言 ID 而不是语言名字符串：名字跟着
+// 系统显示语言走（"中文(简体)"/"Chinese (Simplified)"），ID 不变。以后要给日语
+// （平/片/英）之类的语言加映射，就从这里分流。
+bool ForegroundIsChineseInput(const HWND foreground) {
+	const DWORD thread = GetWindowThreadProcessId(foreground, nullptr);
+	return PRIMARYLANGID(LOWORD(GetKeyboardLayout(thread))) == LANG_CHINESE;
+}
 
 }  // 匿名命名空间
 
@@ -83,15 +91,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
 				if (!g_capsDown) {
 					g_capsDown = true;
+					const HWND target = GetForegroundWindow();
 					const bool alt = (pKeyboard->flags & LLKHF_ALTDOWN) != 0;
 					// Alt+CapsLock 放行给原来的大写锁定。这一条可以在托盘菜单和设置页里
 					// 关掉；关掉之后 Alt 不再特殊，Alt+CapsLock 就和 CapsLock 一样切换输入法。
-					g_capsPassedAsAlt = alt && g_altPassThrough;
-					g_capsSwallowed = g_enabled && !g_capsPassedAsAlt;
+					const bool altPass = alt && g_altPassThrough;
+					// 只有中文输入法下才接管；别的语言（以后可能是日语平/片/英）一律
+					// 原样放行，让 CapsLock 还是系统的大写锁定。
+					g_capsSwallowed = g_enabled && !altPass && ForegroundIsChineseInput(target);
+					g_capsPassReason = !g_enabled ? kCapsPassedMappingOff
+					                  : altPass ? kCapsPassedAlt
+					                  : kCapsPassedOtherLanguage;
 					if (g_capsSwallowed) {
-						// 现在就把目标窗口记下来：排队中的请求不许切换到一个新应用。
+						// 目标窗口按下的那一刻就定下来了：排队中的请求不许切换到一个新应用。
 						g_capsSwallowed = PostMessageW(g_mainWnd, WM_SWITCH_IME,
-						    reinterpret_cast<WPARAM>(GetForegroundWindow()), 0) != FALSE;
+						    reinterpret_cast<WPARAM>(target), 0) != FALSE;
 					}
 				}
 				if (g_capsSwallowed) {
@@ -105,12 +119,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(const int nCode, const WPARAM wParam, cons
 				if (swallowed) {
 					return 1;
 				}
-				// 这一次按键原样放行了（按着 Alt，或者映射被关掉），系统会把它那边的
-				// 大写锁定翻个个儿。回调里不能写日志（文件 I/O 会拖长钩子回调），而且此刻
-				// 按键还没被系统处理，所以等到抬起再通知主线程：既避开回调里的 I/O，
-				// 又保证系统那边已经翻完了。
+				// 这一次按键原样放行了（按着 Alt、映射被关掉，或者前台不是中文输入法），
+				// 系统会把它那边的大写锁定翻个个儿。回调里不能写日志（文件 I/O 会拖长
+				// 钩子回调），而且此刻按键还没被系统处理，所以等到抬起再通知主线程：
+				// 既避开回调里的 I/O，又保证系统那边已经翻完了。
 				g_capsLockOn = !g_capsLockOn;
-				PostMessageW(g_mainWnd, WM_CAPS_LOCK_PASSED, g_capsPassedAsAlt ? 1 : 0,
+				PostMessageW(g_mainWnd, WM_CAPS_LOCK_PASSED, g_capsPassReason,
 				             g_capsLockOn ? 1 : 0);
 			}
 		}

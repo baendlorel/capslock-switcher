@@ -38,9 +38,12 @@ extern std::atomic_int g_cursorTintPercent;
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SWITCH_IME = WM_APP + 2;
 constexpr UINT WM_REINSTALL_HOOK = WM_APP + 3;
-// CapsLock 这次没被映射掉（Alt+CapsLock，或者映射被关掉了）：只把这件事记进日志。
-// wParam 非 0 表示是 Alt 按着。
+// CapsLock 这次没被映射掉：只把这件事记进日志。wParam 是下面哪种情况，
+// lParam 非 0 表示现在是大写。
 constexpr UINT WM_CAPS_LOCK_PASSED = WM_APP + 4;
+constexpr WPARAM kCapsPassedMappingOff = 0;     // 映射总开关关着
+constexpr WPARAM kCapsPassedAlt = 1;            // 按着 Alt，放行给原来的大写锁定
+constexpr WPARAM kCapsPassedOtherLanguage = 2;  // 前台不是中文输入法，留给原键位
 
 // 主窗口上的定时器。
 constexpr UINT_PTR kTimerRetryStartup = 1;

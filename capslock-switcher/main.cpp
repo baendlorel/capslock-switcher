@@ -219,14 +219,19 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		break;
 
 	case WM_CAPS_LOCK_PASSED: {
-		// 没被映射掉的那一次按键：要么按着 Alt，要么映射被关掉了。
-		// lParam 是钩子自己数出来的大写锁定状态（抬起时已经翻过）。
+		// 没被映射掉的那一次按键：映射关着、按着 Alt，或者前台不是中文输入法。
+		// wParam 是哪一种（见 app.h 的 kCapsPassed*），lParam 是钩子自己数出来的
+		// 大写锁定状态（抬起时已经翻过）。三种情况各一行日志，文字在这张表里。
+		static constexpr const wchar_t* kPassText[] = {
+			L"映射已关闭：CapsLock 原样放行（现在%s）",
+			L"Alt+CapsLock：放行给原来的大写锁定（现在%s）",
+			L"非中文输入法：CapsLock 原样放行（现在%s）",
+		};
+		const WPARAM reason = wParam <= kCapsPassedOtherLanguage ? wParam : kCapsPassedMappingOff;
 		const bool upper = lParam != 0;
-		if (wParam != 0) {
-			Log(L"Alt+CapsLock：放行给原来的大写锁定（现在%s）", upper ? L"大写" : L"小写");
+		Log(kPassText[reason], upper ? L"大写" : L"小写");
+		if (reason == kCapsPassedAlt) {
 			ShowCapsLockBanner(upper);
-		} else {
-			Log(L"映射已关闭：CapsLock 原样放行（现在%s）", upper ? L"大写" : L"小写");
 		}
 		break;
 	}

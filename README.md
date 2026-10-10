@@ -4,7 +4,8 @@
 
 ## 功能特性
 
-- ✅ 将CapsLock键映射为Ctrl+Space组合键
+- ✅ 将CapsLock键映射为Ctrl+Space组合键；只有当前前台窗口挂着中文输入法时才接管，别的语言布局下
+  CapsLock 还是系统的大写锁定（以后要加日语平/片/英，就在这一个判断点上分流）
 - ✅ 后台运行，无窗口界面
 - ✅ 系统托盘图标显示运行状态
 - ✅ 右键托盘图标可退出程序
@@ -19,7 +20,8 @@
   切换窗口也会跟着变（切到中文的窗口就变红，切回英文的窗口就变蓝），不按 CapsLock
   直接用 Ctrl+Space 或点任务栏切换也能在半秒内跟上
 - ✅ CapsLock 每按一下都往 `capslock-switcher.log` 写一行：切换输入法、`Alt+CapsLock` 放行
-  （还会记下结果是大写还是小写）、"映射已关闭"都能看出来；设置页开着的时候会实时滚出来
+  （还会记下结果是大写还是小写）、"映射已关闭"、非中文输入法下原样放行都能看出来；
+  设置页开着的时候会实时滚出来
 - ✅ 双击托盘图标（或右键菜单里的"设置..."）打开设置页：上面是设置项，下面是实时日志
 - ✅ `Alt+CapsLock` 触发原本的大写锁定（可以在设置页里关掉），放行时中央会闪一个紫色
   横幅，白色文字写着"大写"或"小写"（小写的紫色淡一半），告诉你现在是什么状态
@@ -31,13 +33,15 @@
 
 1. 在Visual Studio中打开 `capslock-switcher.slnx` 并编译
 2. x64 的产物在仓库根目录：调试用 `x64\Debug\capslock-switcher.exe`，发布用
-   `x64\Release\capslock-switcher.exe`。Release|x64 编译完会自动在根目录打出
-   `capslock-switcher-v<package.json 里的版本号>.zip`（exe + README，解压即用）
+   `x64\Release\capslock-switcher.exe`。**发布就是这一个文件**：静态链接 CRT、不依赖任何
+   运行库，拷到哪台 Win10/11 x64 机器上双击就能跑（发版前改 `capslock-switcher/version.h` 那一行）
 3. 双击运行程序（设置页在主程序里：双击托盘图标，或右键菜单里的"设置..."）
 4. 程序会在系统托盘右下角显示图标
 5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），切换后屏幕中央会闪出当前的输入法
    状态：中文红底"中文"，英文蓝底"English"，约0.5秒后淡出。状态是从前台窗口所在线程的
-   IME 窗口读的，读不到就沿用上一次的结果，宁可显示旧值也不闪一个错的
+   IME 窗口读的，读不到就沿用上一次的结果，宁可显示旧值也不闪一个错的。
+   **接管的前提是前台窗口挂着中文输入法**：切到纯英文等其它语言的布局之后，CapsLock 不再
+   切换、也不再被吞掉，就是原来的大写锁定键
 6. 右键点击托盘图标打开菜单；双击托盘图标直接打开设置页（菜单里也有"设置..."）。
    开关都挪到设置页了，上方是四个勾选项加一个滑块，下方是日志窗口（每秒自动刷新，显示最后 10 行）。
    勾选项和滑块改完立刻生效，也不会再弹提示气泡；失败原因只写进日志：
@@ -45,7 +49,7 @@
      程序仍在后台运行，随时可以再勾回来
    - `Alt+CapsLock = 原来的大写锁定`：勾上（默认）时 `Alt+CapsLock` 等于原来的大写锁定；
      取消后 Alt 不再特殊，`Alt+CapsLock` 和 CapsLock 一样照样切换输入法
-   - `鼠标指针跟着中英文变色`勾选框：总开关。取消勾选立刻把你的指针方案原样装回去，旁边
+   - `鼠标随语言变色`勾选框：总开关。取消勾选立刻把你的指针方案原样装回去，旁边
      的浓度滑块同时变灰、拖不动；再勾回来马上按原来的浓度重新上色，浓度值不会被清掉
    - `颜色浓度`滑块：100%（默认）就是完整的中文红/英文蓝，0% 相当于关掉，中间的数值
      按比例把红/蓝减淡。滑块点哪跳哪，按住还能接着拖（系统的默认行为是点一下只挪一页）。
@@ -59,7 +63,7 @@
      启动、每次 CapsLock 按键、异常都会写进去，按一下就能在窗口里看到一行
    - `打开日志文件`：用系统默认程序打开 `capslock-switcher.log`
    - 关掉设置页（或按 Esc）只是收起来，程序继续在托盘里跑
-7. 右键菜单本身只有三项：版本号（灰显）、`设置...`、`Exit`——开关全在设置页里，菜单不再重复一份。
+7. 右键菜单本身只有三项：当前输入法（灰显）、`设置...`、`Exit`——开关全在设置页里，菜单不再重复一份。
 8. 想临时用一次大写锁定，按 `Alt+CapsLock` 即可（等同于原来的 CapsLock）；松手时屏幕中央
    会闪一个紫色横幅，显示"大写"或"小写"。这一条可以在设置页里关掉，关掉之后
    `Alt+CapsLock` 就和 CapsLock 一样切换输入法。另外它受"启用映射"开关控制：映射关掉时，
@@ -92,8 +96,8 @@ CursorTintPercent=100
 - Visual Studio 2026（平台工具集 v145）
 - Windows SDK
 - C++20标准
-- 编译前会用 Node.js 执行 `gen_version.mjs`，从 `package.json` 生成 `version.h`
-  （该脚本按自身所在目录解析路径，在任何工作目录下调用都能正常工作）
+- 版本号是手写的：`capslock-switcher/version.h` 里一行 `#define APP_VERSION "x.y.z"`，
+  C++ 代码（设置页标题栏、日志）用它；不需要 Node.js 之类的额外工具
 
 ## 技术实现
 
@@ -157,6 +161,10 @@ CursorTintPercent=100
   DPI 缩放，`WM_DPICHANGED` 里换字体并按系统给的位置重排，拖到别的显示器不会发虚。
 - `Alt+CapsLock`：以 CapsLock 首次按下时的 Alt 状态决定是否放行，并保持到该键抬起；
   中途松开 Alt 或改变映射开关，都不会拆散按下/抬起事件
+- 只有中文输入法下才接管 CapsLock：判的是前台线程键盘布局语言 ID 的 `PRIMARYLANGID` 是不是
+  `LANG_CHINESE`，不比对语言名字符串（名字跟着系统显示语言走，"中文(简体)"/"Chinese (Simplified)"
+  两种情况都算中文）。`keyboard.cpp` 里的 `ForegroundIsChineseInput()` 就是以后加日语
+  （平/片/英）之类语言的唯一分流点；现在非中文一律原样放行
 - 启动画面 `umbral-keys.png` 以 RCDATA 资源嵌进 exe（见 `capslock-switcher.rc`），
   用 GDI+ 解码后画进一张**预乘 Alpha（PARGB）**的 DIB，再交给 `UpdateLayeredWindow`
   ——所以它是真正的逐像素透明，键帽边缘不会出现黑框。
@@ -246,8 +254,7 @@ capslock-switcher/
 │   ├── logging.cpp / logging.h     # 诊断日志
 │   ├── surface.cpp / surface.h     # 分层窗口与 DPI 辅助
 │   ├── resource.h                  # 资源ID头文件
-│   ├── version.h                   # 由 gen_version.mjs 生成的版本号
-│   ├── gen_version.mjs             # 从 package.json 生成 version.h
+│   ├── version.h                   # 手写的版本号（发版时改这一行）
 │   ├── app.ico                     # 程序/托盘图标（16/24/32/48/256）
 │   ├── umbral-keys.png             # 启动画面（以 RCDATA 嵌进 exe）
 │   ├── capslock-switcher.rc        # 资源脚本
@@ -256,7 +263,6 @@ capslock-switcher/
 ├── tests/
 │   ├── regression.cpp              # 回归检查
 │   └── run.ps1                     # 跑回归检查（自动加载 VS C++ 环境）
-├── package.json                    # 名称与版本号来源
 └── README.md                       # 本文件
 ```
 

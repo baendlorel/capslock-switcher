@@ -1,1 +1,2 @@
-#define APP_VERSION "0.0.2"
+﻿// 版本号：发版时改这一行。托盘菜单右下角的版本文字和自动打包出来的 zip 名都用它。
+#define APP_VERSION "0.0.3"
