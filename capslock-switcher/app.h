@@ -26,9 +26,10 @@ extern bool g_startupTaskInstalled;
 // Alt+CapsLock 和 CapsLock 一样，照样切换输入法。
 extern std::atomic_bool g_altPassThrough;
 
-// 鼠标指针跟着中英文状态变色（中文红、英文蓝）。默认开——用这个程序就是为了
-// 一眼看出当前是中文还是英文。关掉会立刻把系统光标还原。
-extern std::atomic_bool g_cursorTintEnabled;
+// 鼠标指针跟着中英文状态变色（中文红、英文蓝）的程度：100 是完整的中文红/英文蓝，
+// 0 就是不变（等于关掉，系统光标立刻还原），中间的值按比例把红/蓝减淡。默认满格——
+// 用这个程序就是为了一眼看出当前是中文还是英文。
+extern std::atomic_int g_cursorTintPercent;
 
 // 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，不要占用。
 constexpr UINT WM_TRAYICON = WM_APP + 1;
@@ -51,4 +52,4 @@ constexpr UINT kStartupRefreshDelayMs = 3000;
 void SetMappingEnabled(bool enabled);  // tray.cpp
 void SetStartupEnabled(bool enable);   // startup.cpp
 void SetAltCapsLockEnabled(bool enabled);  // tray.cpp
-void SetCursorTintEnabled(bool enabled);   // cursor.cpp
+void SetCursorTintPercent(int percent);   // cursor.cpp

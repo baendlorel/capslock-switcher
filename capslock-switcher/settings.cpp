@@ -5,9 +5,13 @@
 #include "resource.h"
 #include "surface.h"
 
+#include <commctrl.h>
 #include <shellapi.h>
 
+#include <cstdio>
 #include <memory>
+
+#pragma comment(lib, "comctl32.lib")  // 浓度滑块用的是 comctl32 里的 msctls_trackbar32
 
 namespace {
 
@@ -19,7 +23,7 @@ constexpr int kIdChkMapping = 101;
 constexpr int kIdChkAlt = 102;
 constexpr int kIdChkStartup = 103;
 constexpr int kIdOpenLog = 104;
-constexpr int kIdChkCursor = 105;
+constexpr int kIdSldCursor = 105;
 
 constexpr UINT_PTR kTimerRefresh = 1;
 constexpr UINT kRefreshMs = 1000;
@@ -35,7 +39,8 @@ constexpr ULONGLONG kStartupPendingMs = 20000;
 HWND g_wnd = nullptr;
 HWND g_chkMapping = nullptr;
 HWND g_chkAlt = nullptr;
-HWND g_chkCursor = nullptr;
+HWND g_txtCursor = nullptr;
+HWND g_sldCursor = nullptr;
 HWND g_chkStartup = nullptr;
 HWND g_btnOpenLog = nullptr;
 HWND g_logView = nullptr;
@@ -43,6 +48,7 @@ HFONT g_font = nullptr;
 ULONGLONG g_logSize = 0;  // 上次读到的日志文件大小
 bool g_startupPending = false;
 ULONGLONG g_startupPendingUntil = 0;
+int g_shownCursorPercent = -1;  // 标签上现在写的是多少，免得每秒白重设一遍同样的文字
 
 // 日志框显示的是日志文件的尾部：文件一变就整段重读，没变就什么都不做。
 bool ReloadLogTail() {
@@ -149,6 +155,12 @@ void ApplyFont(const HWND parent, const HFONT font) {
 void CreateControls(const HWND wnd) {
 	g_font = MakeUiFont(ScreenDpi(wnd, wnd));
 
+	// 滑块这个类由 comctl32 提供，先把那条 DLL 拉起来（别的控件 user32 就够了）。
+	const INITCOMMONCONTROLSEX commonControls = {
+		static_cast<DWORD>(sizeof(commonControls)), ICC_BAR_CLASSES
+	};
+	InitCommonControlsEx(&commonControls);
+
 	g_chkMapping = CreateWindowExW(
 	    0, L"BUTTON", L"启用映射 (CapsLock -> Ctrl+Space)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
@@ -157,10 +169,16 @@ void CreateControls(const HWND wnd) {
 	    0, L"BUTTON", L"Alt+CapsLock = 原来的大写锁定",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkAlt)), g_hInst, nullptr);
-	g_chkCursor = CreateWindowExW(
-	    0, L"BUTTON", L"鼠标指针跟着变色 (中文红 / 英文蓝)",
-	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
-	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkCursor)), g_hInst, nullptr);
+	g_txtCursor = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, wnd,
+	                              nullptr, g_hInst, nullptr);
+	g_sldCursor = CreateWindowExW(
+	    0, L"msctls_trackbar32", L"",
+	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, 0, 0, 0, 0, wnd,
+	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSldCursor)), g_hInst, nullptr);
+	SendMessageW(g_sldCursor, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+	SendMessageW(g_sldCursor, TBM_SETTICFREQ, 10, 0);
+	SendMessageW(g_sldCursor, TBM_SETPAGESIZE, 0, 10);
+	SendMessageW(g_sldCursor, TBM_SETPOS, TRUE, g_cursorTintPercent.load());
 	g_chkStartup = CreateWindowExW(
 	    0, L"BUTTON", L"开机启动 (管理员)",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
@@ -188,6 +206,7 @@ void LayoutChildren(const HWND wnd) {
 	const int gap = MulDiv(6, dpi, 96);
 	const int buttonW = MulDiv(140, dpi, 96);
 	const int buttonH = MulDiv(30, dpi, 96);
+	const int sliderH = MulDiv(32, dpi, 96);  // 滑块的拇指和刻度是系统画的，别压得太矮
 	const int inner = client.right - client.left - margin * 2;
 
 	int y = margin;
@@ -195,8 +214,10 @@ void LayoutChildren(const HWND wnd) {
 	y += row;
 	MoveWindow(g_chkAlt, margin, y, inner, row, TRUE);
 	y += row;
-	MoveWindow(g_chkCursor, margin, y, inner, row, TRUE);
+	MoveWindow(g_txtCursor, margin, y, inner, row, TRUE);
 	y += row;
+	MoveWindow(g_sldCursor, margin, y, inner, sliderH, TRUE);
+	y += sliderH;
 	MoveWindow(g_chkStartup, margin, y, inner, row, TRUE);
 	y += row + gap;
 	MoveWindow(g_btnOpenLog, margin, y, buttonW, buttonH, TRUE);
@@ -213,9 +234,12 @@ void SyncControls() {
 		SendMessageW(g_chkAlt, BM_SETCHECK,
 		             g_altPassThrough.load() ? BST_CHECKED : BST_UNCHECKED, 0);
 	}
-	if (g_chkCursor != nullptr) {
-		SendMessageW(g_chkCursor, BM_SETCHECK,
-		             g_cursorTintEnabled.load() ? BST_CHECKED : BST_UNCHECKED, 0);
+	if (g_txtCursor != nullptr && g_shownCursorPercent != g_cursorTintPercent.load()) {
+		g_shownCursorPercent = g_cursorTintPercent.load();
+		wchar_t text[80] = {};
+		swprintf_s(text, L"鼠标指针跟着中英文变色 (中文红 / 英文蓝)：%d%%",
+		           g_shownCursorPercent);
+		SetWindowTextW(g_txtCursor, text);
 	}
 	if (g_chkStartup == nullptr) {
 		return;
@@ -305,6 +329,15 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 		}
 		return 0;
 
+	case WM_HSCROLL:
+		// 只有这一个滑块，拖它就等于改指针颜色的浓度。
+		if (reinterpret_cast<HWND>(lParam) == g_sldCursor) {
+			SetCursorTintPercent(
+			    static_cast<int>(SendMessageW(g_sldCursor, TBM_GETPOS, 0, 0)));
+			SyncControls();
+		}
+		return 0;
+
 	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
 		case kIdChkMapping:
@@ -312,9 +345,6 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 			return 0;
 		case kIdChkAlt:
 			SetAltCapsLockEnabled(SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED);
-			return 0;
-		case kIdChkCursor:
-			SetCursorTintEnabled(SendMessageW(g_chkCursor, BM_GETCHECK, 0, 0) == BST_CHECKED);
 			return 0;
 		case kIdChkStartup:
 			g_startupPending = true;

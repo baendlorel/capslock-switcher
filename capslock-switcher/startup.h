@@ -10,4 +10,5 @@ constexpr wchar_t kCommandStartupDisable[] = L"--startup-disable";
 
 bool QueryStartupTask();
 bool IsProcessElevated();
+void SyncStartupTaskPath();  // 任务记的还是老路径时，把它改指当前这份 exe
 int RunStartupHelper(bool enable);  // 提权副本：干完活就退出，不创建窗口

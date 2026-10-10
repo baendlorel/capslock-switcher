@@ -362,7 +362,7 @@ static bool LooksTinted(const std::vector<DWORD>& pixels, const COLORREF color) 
 // 用替身走一遍，确认喂给 SetSystemCursor 的确实是目标颜色。
 static void TestCursor() {
     DWORD light[4] = { 0xFFFFFFFF, 0xFF000000, 0x00FFFFFF, 0xFF808080 };
-    TintPixels(light, 4, kChineseColor, false);
+    TintPixels(light, 4, kChineseColor, false, 100);
     Check(light[0] == Argb(kChineseColor), "a light body takes the tint colour");
     Check(light[1] == 0xFF000000, "the black outline of a light body stays black");
     Check((light[2] >> 24) == 0, "transparent pixels stay transparent");
@@ -370,9 +370,26 @@ static void TestCursor() {
           "half-lit pixels blend towards the tint");
 
     DWORD dark[2] = { 0xFF000000, 0xFFFFFFFF };
-    TintPixels(dark, 2, kChineseColor, true);
+    TintPixels(dark, 2, kChineseColor, true, 100);
     Check(dark[0] == Argb(kChineseColor), "a dark body takes the tint colour");
     Check(dark[1] == 0xFFFFFFFF, "the white outline of a dark body stays white");
+
+    // 滑块：0% 原样不动，100% 是上面那个满色，中间按比例在两个结果之间插值。
+    DWORD untouched[3] = { 0xFFFFFFFF, 0xFF000000, 0x00FFFFFF };
+    TintPixels(untouched, 3, kChineseColor, false, 0);
+    Check(untouched[0] == 0xFFFFFFFF && untouched[1] == 0xFF000000 &&
+              (untouched[2] >> 24) == 0,
+          "at 0% the pixels come out exactly as they went in");
+
+    DWORD half[1] = { 0xFFFFFFFF };  // 白体：满色时整块变成目标色
+    TintPixels(half, 1, kChineseColor, false, 50);
+    const DWORD full = Argb(kChineseColor);
+    const int halfR = static_cast<int>((half[0] >> 16) & 0xFF);
+    const int halfG = static_cast<int>((half[0] >> 8) & 0xFF);
+    const int halfB = static_cast<int>(half[0] & 0xFF);
+    Check(halfR == 0xFF && halfG > static_cast<int>((full >> 8) & 0xFF) && halfG < 0xFF &&
+              halfB > static_cast<int>(full & 0xFF) && halfB < 0xFF,
+          "at 50% the pixels land halfway between the original and the full tint");
 
     // 热点必须原样带过去：I 型的热点不在角上，丢了点击落点就不准。
     CursorSource sample;
@@ -428,15 +445,15 @@ static void TestCursor() {
           "switching back repaints in the English colour");
 
     const unsigned reloadsBefore = cursorReloads;
-    SetCursorTintEnabled(false);
-    Check(cursorReloads == reloadsBefore + 1, "turning the switch off reloads the user's cursors");
-    Check(g_applied == Tint::None, "nothing stays applied after turning it off");
+    SetCursorTintPercent(0);
+    Check(cursorReloads == reloadsBefore + 1, "sliding to 0% reloads the user's cursors");
+    Check(g_applied == Tint::None, "nothing stays applied at 0%");
     setCursorCalls = 0;
     ApplyTint(true);
-    Check(setCursorCalls == 0, "a disabled switch never touches the system cursors");
+    Check(setCursorCalls == 0, "at 0% the system cursors are never touched");
 
-    SetCursorTintEnabled(true);
-    Check(setCursorCalls == std::size(kCursorIds), "turning it back on tints right away");
+    SetCursorTintPercent(60);
+    Check(setCursorCalls == std::size(kCursorIds), "leaving 0% tints right away");
 
     DestroyCursorTint();
     DestroyCursorTint();
@@ -445,11 +462,31 @@ static void TestCursor() {
     std::puts("PASS: cursor tint colour rule, hotspot round trip, state machine, shutdown");
 }
 
+static void TestStartupTaskXml() {
+    // 计划任务的动作路径是从 schtasks /Query /XML 的 <Command> 里抠出来的：
+    // 外围引号和 XML 转义都得还原，读不出来时要如实报告"没有"。
+    std::wstring path;
+    Check(ExtractCommandPath(L"<Exec><Command>\"C:\\A B\\app.exe\"</Command></Exec>", path) &&
+              path == L"C:\\A B\\app.exe",
+          "the quoted action path unwraps to the real exe path");
+    Check(ExtractCommandPath(L"<Command>C:\\a&amp;b\\x.exe</Command>", path) &&
+              path == L"C:\\a&b\\x.exe",
+          "XML escapes decode back to the real path");
+    Check(!ExtractCommandPath(L"<Task><Settings/></Task>", path),
+          "a task without an action reports no path");
+    // schtasks 倒出来的 XML 是单字节的，UTF-8 解得动就按 UTF-8 解。
+    std::wstring decoded;
+    Check(DecodeConsoleText("x\346\265\213\350\257\225y", decoded) && decoded == L"x\u6D4B\u8BD5y",
+          "UTF-8 console output decodes to the expected text");
+    std::puts("PASS: startup task XML");
+}
+
 int main() {
     TestKeyboard();
     TestHookThread();
     TestRendering();
     TestCursor();
+    TestStartupTaskXml();
     std::puts("All regression checks passed.");
     return 0;
 }

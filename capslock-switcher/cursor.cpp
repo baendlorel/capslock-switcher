@@ -47,6 +47,11 @@ ULONGLONG g_lastProbeTick = 0;
 unsigned g_pollTicks = 0;
 bool g_resetting = false;  // 我们自己发起的重载：别当成"用户改了方案"再处理一遍
 
+// 0% 就是"不变"：这时和以前关掉那个开关是一回事，系统光标保持用户自己的样子。
+bool TintOn() {
+	return g_cursorTintPercent.load() > 0;
+}
+
 int Luma(const DWORD px) {
 	return static_cast<int>(((px >> 16 & 0xFF) * 299 + (px >> 8 & 0xFF) * 587 +
 	                         (px & 0xFF) * 114) /
@@ -71,8 +76,11 @@ bool DetectDarkInk(const std::vector<DWORD>& pixels) {
 // 保形上色：本体朝目标色靠拢，另一头的描边保持原样。
 //   亮体：out = lerp(黑, 目标色, L/255)      —— 白体变目标色，黑边还是黑
 //   暗体：out = lerp(白, 目标色, (255-L)/255) —— 黑体变目标色，白边还是白
+// percent 是上色程度：100 就是上面那个满色，0 原样不动，中间按比例在"原来的像素"
+// 和满色之间插值——所以滑块越小，红/蓝越淡。
 // 只动 RGB 不动 A，保持 straight alpha。
-void TintPixels(DWORD* pixels, const size_t count, const COLORREF color, const bool darkInk) {
+void TintPixels(DWORD* pixels, const size_t count, const COLORREF color, const bool darkInk,
+                const int percent) {
 	const int tint[3] = { GetRValue(color), GetGValue(color), GetBValue(color) };
 	const int keep = darkInk ? 255 : 0;
 	for (size_t i = 0; i < count; ++i) {
@@ -86,7 +94,9 @@ void TintPixels(DWORD* pixels, const size_t count, const COLORREF color, const b
 			                     static_cast<int>(px & 0xFF) };
 		DWORD out = px & 0xFF000000;
 		for (int c = 0; c < 3; ++c) {
-			out |= static_cast<DWORD>(keep + (tint[c] - keep) * weight / 255) << (16 - c * 8);
+			const int full = keep + (tint[c] - keep) * weight / 255;
+			out |= static_cast<DWORD>(channel[c] + (full - channel[c]) * percent / 100)
+			       << (16 - c * 8);
 		}
 		pixels[i] = out;
 	}
@@ -315,7 +325,7 @@ void RebuildSources() {
 
 void ApplyTint(const bool chinese) {
 	g_target = chinese ? Tint::Chinese : Tint::English;
-	if (!g_cursorTintEnabled.load() || g_applied == g_target || HighContrastOn()) {
+	if (!TintOn() || g_applied == g_target || HighContrastOn()) {
 		return;
 	}
 	const COLORREF color = chinese ? kChineseColor : kEnglishColor;
@@ -325,7 +335,8 @@ void ApplyTint(const bool chinese) {
 			continue;
 		}
 		std::vector<DWORD> pixels = g_sources[i].pixels;
-		TintPixels(pixels.data(), pixels.size(), color, g_sources[i].darkInk);
+		TintPixels(pixels.data(), pixels.size(), color, g_sources[i].darkInk,
+		           g_cursorTintPercent.load());
 		const HCURSOR cursor = PackCursor(g_sources[i], pixels);
 		if (cursor == nullptr) {
 			continue;
@@ -345,7 +356,7 @@ void ApplyTint(const bool chinese) {
 // Windows 偶尔会自己把光标方案重载一遍（登录时、会话中途也见过），颜色会被冲掉。
 // 直接无条件重刷，不去检测——重新造三个光标比检测便宜。
 void ReapplyTint() {
-	if (!g_cursorTintEnabled.load() || g_target == Tint::None) {
+	if (!TintOn() || g_target == Tint::None) {
 		return;
 	}
 	g_applied = Tint::None;
@@ -367,7 +378,7 @@ void InitializeCursorTint() {
 	g_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
 	                                   ForegroundEventProc, 0, 0,
 	                                   WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-	if (!g_cursorTintEnabled.load()) {
+	if (!TintOn()) {
 		return;
 	}
 	// 先自愈再解码：上一次要是被强杀，槽里留着的就是我们的颜色。
@@ -389,7 +400,7 @@ void CursorSettleTick() {
 	if (g_mainWnd != nullptr) {
 		KillTimer(g_mainWnd, kTimerCursorSettle);
 	}
-	if (!g_cursorTintEnabled.load()) {
+	if (!TintOn()) {
 		return;
 	}
 	g_lastProbeTick = GetTickCount64();
@@ -397,7 +408,7 @@ void CursorSettleTick() {
 }
 
 void CursorPollTick() {
-	if (!g_cursorTintEnabled.load() || g_mainWnd == nullptr) {
+	if (!TintOn() || g_mainWnd == nullptr) {
 		return;
 	}
 	if (++g_pollTicks % kReapplyTicks == 0) {
@@ -411,7 +422,7 @@ void CursorPollTick() {
 }
 
 void OnSystemCursorsChanged() {
-	if (!g_cursorTintEnabled.load()) {
+	if (!TintOn()) {
 		return;
 	}
 	RebuildSources();  // 用户换了方案/大小，旧像素作废；顺带把我们的颜色冲掉
@@ -440,9 +451,13 @@ void DestroyCursorTint() {
 	g_pollTicks = 0;
 }
 
-void SetCursorTintEnabled(const bool enabled) {
-	g_cursorTintEnabled = enabled;
-	if (!enabled) {
+void SetCursorTintPercent(const int percent) {
+	const int wanted = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	const bool wasOn = TintOn();
+	g_cursorTintPercent = wanted;
+
+	if (wanted == 0) {
+		// 0% 就是不变：把系统光标还回去，轮询也停掉，和以前关掉那个开关一样。
 		if (g_mainWnd != nullptr) {
 			KillTimer(g_mainWnd, kTimerCursorSettle);
 			KillTimer(g_mainWnd, kTimerCursorPoll);
@@ -451,11 +466,19 @@ void SetCursorTintEnabled(const bool enabled) {
 		ShowBalloon(L"鼠标指针不再跟着中英文变色");
 		return;
 	}
-	RebuildSources();
-	if (g_mainWnd != nullptr) {
-		SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
+
+	if (!wasOn) {
+		// 刚从"不变"里走出来：先自愈再解码。上一次要是被强杀，槽里留着的就是我们染过的
+		// 光标，直接拿它当原图会越染越深。
+		RebuildSources();
+		if (g_mainWnd != nullptr) {
+			SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
+		}
+		g_lastProbeTick = GetTickCount64();
+		ShowBalloon(L"鼠标指针跟着中英文变色");
 	}
-	g_lastProbeTick = GetTickCount64();
+
+	// 百分比变了，槽里贴着的旧颜色就不作数了，重刷一遍。
+	g_applied = Tint::None;
 	ApplyTint(CurrentInputIsChinese());
-	ShowBalloon(L"鼠标指针跟着中英文变色");
 }

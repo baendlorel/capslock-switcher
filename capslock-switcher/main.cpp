@@ -40,8 +40,8 @@ bool g_startupTaskInstalled = false;
 // Alt+CapsLock 放行给原来的大写锁定（默认开）。
 std::atomic_bool g_altPassThrough{ true };
 
-// 鼠标指针跟着中英文变色（默认开）。
-std::atomic_bool g_cursorTintEnabled{ true };
+// 鼠标指针跟着中英文变色（默认满格 100%）。
+std::atomic_int g_cursorTintPercent{ 100 };
 
 namespace {
 
@@ -152,6 +152,9 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		// 启动时问一次登录任务在不在，这个答案就是菜单和设置页里
 		// "开机启动"旁边那个勾。
 		g_startupTaskInstalled = QueryStartupTask();
+
+		// 升级换了目录或 exe 名字的话，任务里存的还是老路径，得改指当前这份 exe。
+		SyncStartupTaskPath();
 
 		// 启动时记一行：设置页的日志窗口一打开就能看到钩子和托盘图标有没有挂上。
 		Log(L"启动：键盘钩子 %s，托盘图标 %s",
