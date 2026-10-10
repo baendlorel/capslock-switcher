@@ -1,6 +1,7 @@
 // Microsoft Visual C++ 生成的资源脚本。
 //
 #include "resource.h"
+#include "version.h"
 
 #define APSTUDIO_READONLY_SYMBOLS
 /////////////////////////////////////////////////////////////////////////////
@@ -55,6 +56,38 @@ IDI_MAINICON            ICON                    "app.ico"
 
 // 键帽 PNG：程序启动时向用户打个招呼，停留片刻。
 IDR_SPLASH_IMAGE        RCDATA                  "umbral-keys.png"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// 版本信息
+//
+
+// 版本号来自 version.h：gen_version.mjs 按 package.json 生成，编译前刷新。
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION APP_VERSION_NUM
+ PRODUCTVERSION APP_VERSION_NUM
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "CapsLock Switcher"
+            VALUE "FileVersion", APP_VERSION
+            VALUE "InternalName", "capslock-switcher"
+            VALUE "OriginalFilename", "capslock-switcher.exe"
+            VALUE "ProductName", "CapsLockSwitcher"
+            VALUE "ProductVersion", APP_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
 
 #endif    // 中文(简体，中国) resources
 /////////////////////////////////////////////////////////////////////////////

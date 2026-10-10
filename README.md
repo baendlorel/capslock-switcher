@@ -1,4 +1,4 @@
-﻿# CapsLock切换器 (CapsLock Switcher)
+# CapsLock切换器 (CapsLock Switcher)
 
 将CapsLock键映射为Ctrl+Space的Windows工具，方便切换中英文输入法。
 
@@ -27,11 +27,29 @@
 - ✅ 程序启动时在屏幕中央显示 `umbral-keys.png`，随后淡出
 - ✅ 出错退出时把详细错误信息写入 exe 同目录的 `capslock-switcher.log`
 
+## Windows 10 / Windows 11 与发布
+
+- 设置页的兼容目标为 **Windows 10 1809（17763）及以上的 x64 系统**，包括 Windows 11。
+  这是兼容目标，不代表每个系统版本都已实机验证；发布前优先在干净的 Win10 22H2 虚拟机测试。
+- Release 使用 Windows App SDK 自包含部署，同时携带当前工具链的可再发行 VC++ CRT。
+  **必须解压整个 ZIP 并保留全部文件/子目录**，不能只拷两个 exe；不再要求用户另装
+  Windows App Runtime 或 VC++ 运行库。Debug 仍是开发配置，不用于发布。
+- 不支持 Mica 的环境使用系统主题纯色背景；Win10 的标题按钮颜色由系统决定。
+  窗口缩小或文字放大时可滚动访问全部设置，不为隐藏滚动条而裁掉内容。
+- 构建 `capslock-switcher.slnx` 的 **Release | x64**，在仓库根目录取得
+  `capslock-switcher-v<package.json 中的版本号>.zip`；运行入口是包中的 `capslock-switcher.exe`。
+  设置程序先构建成功，再打包；ZIP 不带开发机的 ini、日志、PDB 或 ILK。
+- 解压到用户可写文件夹。首次启动自动建立 ini；不要直接在压缩包中运行。
+
+验证命令：`pwsh -File tests/release-package.ps1`（包完整性与嵌入清单）、
+`pwsh -File tests/settings-dpi.ps1 -Configuration Release`（DPI 清单）、
+`pwsh -File tests/run.ps1`（不会安装键盘钩子的回归测试）。
+在 Win10 验证设置页启动、深浅色/高对比度主题、拖拽/缩放、配置保存、日志刷新；
+开机启动的提权操作需要由测试人员确认。
 ## 使用方法
 
 1. 在Visual Studio中打开 `capslock-switcher.slnx` 并编译
-2. 在 `capslock-switcher\x64\Debug`、`capslock-switcher\x64\Release`（x64），
-   或 `capslock-switcher\Debug`、`capslock-switcher\Release`（Win32）目录找到生成的exe文件
+2. x64 构建输出在仓库根目录的 `x64\Debug` 或 `x64\Release`；发布使用上述自动生成的 ZIP
 3. 双击运行程序
 4. 程序会在系统托盘右下角显示图标
 5. 按下CapsLock键即可切换输入法（实际发送Ctrl+Space），切换后屏幕中央会闪出当前的输入法

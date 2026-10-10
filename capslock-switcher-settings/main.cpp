@@ -15,6 +15,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.UI.Text.h>
+#include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
@@ -182,8 +183,7 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		Resources().MergedDictionaries().Append(XamlControlsResources());
 		m_window = Window();
 		m_window.Title(kWindowTitle);
-		// 标题栏和页面共用一块底：内容延伸进标题栏，Mica 垫在下面。
-		m_window.SystemBackdrop(MicaBackdrop());
+
 		m_window.ExtendsContentIntoTitleBar(true);
 		BuildUi();
 		m_window.SetTitleBar(m_titleBar);
@@ -304,17 +304,23 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		ScrollViewer::SetVerticalScrollBarVisibility(m_log, ScrollBarVisibility::Auto);
 		root.Children().Append(m_log);
 
-		// 高度是按内容定死的，页面本身不该出现滚动条；真被拉小了还能滚，只是不画条。
 		ScrollViewer scroll;
 		scroll.Content(root);
-		scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Hidden);
+		scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
 
 		// 顶上这条空带就是标题栏的拖拽区，正文从它下面开始。
 		m_titleBar.Height(32);
 		m_titleBar.VerticalAlignment(VerticalAlignment::Top);
 		m_titleBar.Background(SolidColorBrush(winrt::Windows::UI::Color{ 0, 0, 0, 0 }));
 
-		Grid page;
+		// Win10 / 不支持 Mica 时使用随浅色、深色和高对比度主题更新的实体背景。
+		auto page = Markup::XamlReader::Load(
+		    LR"(<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		             Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" />)").as<Grid>();
+		if (winrt::Microsoft::UI::Composition::SystemBackdrops::MicaController::IsSupported()) {
+			m_window.SystemBackdrop(MicaBackdrop());
+			page.Background(nullptr);
+		}
 		page.Children().Append(scroll);
 		page.Children().Append(m_titleBar);
 		m_window.Content(page);
@@ -327,10 +333,11 @@ struct SettingsApp : ApplicationT<SettingsApp, Markup::IXamlMetadataProvider> {
 		const int height = MulDiv(570, static_cast<int>(dpi), 96);
 		if (const auto appWindow = m_window.AppWindow(); appWindow != nullptr) {
 			appWindow.Resize({ width, height });
-			// 标题按钮叠在页面背景上，别再自己画一层底色（0,0,0,0 就是全透明）。
+			// SDK 1.7 在 Win10 也支持自定义标题栏；按钮颜色在 Win10 上被系统忽略。
+			const auto titleBar = appWindow.TitleBar();
 			const winrt::Windows::UI::Color transparent{ 0, 0, 0, 0 };
-			appWindow.TitleBar().ButtonBackgroundColor(transparent);
-			appWindow.TitleBar().ButtonInactiveBackgroundColor(transparent);
+			titleBar.ButtonBackgroundColor(transparent);
+			titleBar.ButtonInactiveBackgroundColor(transparent);
 		}
 		// app.ico 已经嵌进这个 exe；大小图标都设，标题栏和任务栏才都认得。
 		const HICON icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_MAINICON));

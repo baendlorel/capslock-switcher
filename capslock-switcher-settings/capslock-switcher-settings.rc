@@ -1,16 +1,16 @@
-// Microsoft Visual C++ ���ɵ���Դ�ű���
+// Microsoft Visual C++ 生成的资源脚本。
 //
-// app.ico ����������Ŀ¼��� capslock-switcher-settings.vcxproj �ĸ��Ӱ���
-// Ŀ¼ָ������rc.exe ���·����ĸ��𵥷�б�ܵ���ת�����У���������ֻд�ļ�����
+// app.ico 放在主程序目录里，由 capslock-switcher-settings.vcxproj 的附加包含
+// 目录指过来；rc.exe 会把路径里的个别单反斜杠当成转义序列，所以这里只写文件名。
 #include "resource.h"
 
 #pragma code_page(936)
 
 /////////////////////////////////////////////////////////////////////////////
 //
-// ͼ��
+// 图标
 //
 
-// ����������ͬһ�� app.ico��ID ȡ��Сֵ����������Alt+Tab �� Explorer
-// ������һ�ݣ��������� exe �Աߵ����� .ico��
+// 和主程序共用同一份 app.ico。ID 取最小值，任务栏、Alt+Tab 和 Explorer
+// 都拿这一份，不用再往 exe 旁边单独拷 .ico。
 IDI_MAINICON            ICON                    "app.ico"

@@ -19,6 +19,8 @@
     <WindowsTargetPlatformMinVersion>10.0.17763.0</WindowsTargetPlatformMinVersion>
     <!-- 纯 C++ WinUI3；非打包应用使用 Windows App Runtime 1.7。 -->
     <WindowsPackageType>None</WindowsPackageType>
+    <!-- 随程序分发框架，不要求用户预装 Windows App Runtime。 -->
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <AppxPackage>false</AppxPackage>
     <ProjectName>capslock-switcher-settings</ProjectName>
     <!-- 两个 exe 必须躺在同一个目录：ini、日志、以及"拉起设置界面"都按同目录找。 -->
@@ -80,6 +82,14 @@
   <!-- 编译前生成版本号头文件：和主程序共用 package.json 里的版本号。 -->
   <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
     <Exec Command="node &quot;$(ProjectDir)../capslock-switcher/gen_version.mjs&quot;" />
+  </Target>
+  <!-- Release 保持 /MD，随包携带当前工具链的可再发行 CRT。 -->
+  <Target Name="CopyCppRuntime" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">
+    <ItemGroup>
+      <CppRuntime Include="$(VCToolsRedistInstallDir)$(Platform)\Microsoft.VC*.CRT\*.dll" />
+    </ItemGroup>
+    <Error Condition="'@(CppRuntime)'==''" Text="找不到 VC++ 可再发行运行库：$(VCToolsRedistInstallDir)。请安装 C++ 工具链的 Redist 组件。" />
+    <Copy SourceFiles="@(CppRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -178,12 +178,41 @@
     <ResourceCompile Include="capslock-switcher.rc" />
   </ItemGroup>
   <ItemGroup>
+    <!-- 打包要两个 exe 都是新的，所以 Release 下让设置程序先编完；Debug 不拖累主程序。 -->
+    <ProjectReference Include="..\capslock-switcher-settings\capslock-switcher-settings.vcxproj" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\package.json" />
     <None Include="gen_version.mjs" />
   </ItemGroup>
   <!-- 编译前生成版本号头文件（路径带空格也能正常工作）。 -->
   <Target Name="RunGenVersion" BeforeTargets="PreBuildEvent">
     <Exec Command="node &quot;$(ProjectDir)gen_version.mjs&quot;" />
+  </Target>
+  <!-- x64 Release 包含完整的 app-local WinUI/CRT 依赖，不再生成缺文件的小包。 -->
+  <Target Name="PackageRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Exec Command="node -e &quot;console.log(require('./package.json').version)&quot;"
+          WorkingDirectory="$(ProjectDir).." ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="AppVersion" />
+    </Exec>
+    <Error Condition="!Exists('$(OutDir)capslock-switcher-settings.exe') Or !Exists('$(OutDir)Microsoft.ui.xaml.dll') Or !Exists('$(OutDir)Microsoft.WindowsAppRuntime.dll') Or !Exists('$(OutDir)msvcp140.dll')"
+           Text="自包含发布文件不完整，请先成功构建 x64 Release 设置程序。" />
+    <ItemGroup>
+      <PackageFiles Include="$(OutDir)**\*.dll;$(OutDir)**\*.pri;$(OutDir)**\*.winmd;$(OutDir)**\*.mui;$(OutDir)**\*.png;$(OutDir)**\*.xbf;$(OutDir)**\*.xaml;$(OutDir)**\workloads*.json;$(OutDir)**\map.html;$(OutDir)**\*.manifest"
+                    Exclude="$(OutDir)**\Microsoft.WindowsAppRuntime.Bootstrap.dll" />
+      <PackageFiles Include="$(OutDir)capslock-switcher.exe;$(OutDir)capslock-switcher-settings.exe;$(OutDir)RestartAgent.exe" />
+    </ItemGroup>
+    <!-- 每次清空专用 staging，避免旧包的 DLL、日志和配置混进新包。 -->
+    <RemoveDir Directories="$(ProjectDir)x64\Release\package" />
+    <Copy SourceFiles="@(PackageFiles)"
+          DestinationFiles="@(PackageFiles->'$(ProjectDir)x64\Release\package\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="$(ProjectDir)..\README.md" DestinationFolder="$(ProjectDir)x64\Release\package" />
+    <ZipDirectory SourceDirectory="$(ProjectDir)x64\Release\package"
+                  DestinationFile="$(ProjectDir)../capslock-switcher-v$(AppVersion).zip"
+                  Overwrite="true" />
+    <Message Importance="high" Text="已打包：capslock-switcher-v$(AppVersion).zip（x64，自带 WinUI 和 VC++ 运行库）" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
