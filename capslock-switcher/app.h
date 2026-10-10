@@ -15,6 +15,13 @@ constexpr COLORREF kEnglishColor = RGB(0x00, 0x73, 0xFF);  // #0073FF
 extern HINSTANCE g_hInst;
 extern HWND g_mainWnd;  // 隐藏的主窗口：钩子消息和定时器都投给它
 
+// ini 缺失、写坏或读不出来时回到这几个默认值：main.cpp 用它们初始化全局变量，
+// settings.cpp 的加载也用它兜底，两边不会各写一份。
+constexpr bool kDefaultEnabled = true;
+constexpr bool kDefaultAltPassThrough = true;
+constexpr bool kDefaultCursorTintEnabled = true;
+constexpr int kDefaultCursorTintPercent = 100;
+
 // 托盘菜单和设置页共同控制的"启用映射"开关。关掉时钩子原样放行 CapsLock，
 // 这个键就恢复成普通的 CapsLock。
 extern std::atomic_bool g_enabled;
@@ -26,9 +33,10 @@ extern bool g_startupTaskInstalled;
 // Alt+CapsLock 和 CapsLock 一样，照样切换输入法。
 extern std::atomic_bool g_altPassThrough;
 
-// 鼠标指针跟着中英文状态变色（中文红、英文蓝）的程度：100 是完整的中文红/英文蓝，
-// 0 就是不变（等于关掉，系统光标立刻还原），中间的值按比例把红/蓝减淡。默认满格——
-// 用这个程序就是为了一眼看出当前是中文还是英文。
+// 鼠标指针跟着中英文状态变色的总开关；关掉时系统光标立刻还原，滑块也不再起作用。
+extern std::atomic_bool g_cursorTintEnabled;
+
+// 变色程度：100 是完整的中文红/英文蓝，0 和总开关关闭等价，中间的值按比例把红/蓝减淡。
 extern std::atomic_int g_cursorTintPercent;
 
 // 应用私有消息都排在 WM_APP 之上。WM_USER 那一段留给窗口类自己，不要占用。
@@ -53,3 +61,4 @@ void SetMappingEnabled(bool enabled);  // tray.cpp
 void SetStartupEnabled(bool enable);   // startup.cpp
 void SetAltCapsLockEnabled(bool enabled);  // tray.cpp
 void SetCursorTintPercent(int percent);   // cursor.cpp
+void SetCursorTintEnabled(bool enabled);  // cursor.cpp

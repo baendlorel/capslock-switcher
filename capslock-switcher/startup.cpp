@@ -224,19 +224,20 @@ bool QueryStartupTask() {
 	return RunAndWait(command) == 0;
 }
 
+// 不弹气泡：开机启动失败只记日志。这条路上本来就有一次 UAC 提示，
+// 用户拒绝时从返回值能看出来，但为了不打扰，界面上不再另行提示。
 void SetStartupEnabled(const bool enable) {
 	if (IsProcessElevated()) {
-		const bool ok = enable ? InstallStartupTask() : RemoveStartupTask();
+		if (!(enable ? InstallStartupTask() : RemoveStartupTask())) {
+			Log(L"开机启动%s失败，详见上面的日志", enable ? L"开启" : L"关闭");
+		}
 		g_startupTaskInstalled = QueryStartupTask();
-		ShowBalloon(ok ? (enable ? L"已开启开机启动" : L"已关闭开机启动")
-		               : L"开机启动设置失败，详见日志");
 		return;
 	}
 
-	// 自己没提权，就把这件事交给一个提权后的自己去做——这也就是
-	// "需要管理员权限"必然带来的一次 UAC 提示。
+	// 自己没提权，就把这件事交给一个提权后的自己去做。
 	if (!RunElevated(enable)) {
-		ShowBalloon(L"需要管理员权限");
+		Log(L"提权副本没能启动，开机启动设置没有改动");
 	}
 }
 

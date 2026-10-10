@@ -504,6 +504,27 @@ static void TestCursor() {
           "a colour cursor without alpha keeps opaque black according to its AND mask");
     DeleteObject(monoMask);
 
+    // 本体方向的判定：贴透明的那一圈是描边。细长形状（I 型、十字）的白芯面积小，
+    // 用整图平均亮度会被黑描边带偏，按边界判才稳。
+    const auto makeRing = [](const DWORD outline, const DWORD fill) {
+        std::vector<DWORD> pixels(81, 0);
+        for (int y = 1; y < 8; ++y) {
+            for (int x = 1; x < 8; ++x) {
+                pixels[y * 9 + x] = (x >= 3 && x <= 5 && y >= 3 && y <= 5) ? fill : outline;
+            }
+        }
+        return pixels;
+    };
+    std::vector<DWORD> lightBody = makeRing(0xFF000000, 0xFFFFFFFF);
+    Check(!DetectDarkInk(lightBody, 9, 9), "a white fill inside a black outline is a light body");
+    TintPixels(lightBody.data(), lightBody.size(), kChineseColor, false, 100);
+    Check(lightBody[4 * 9 + 4] == Argb(kChineseColor) && lightBody[2 * 9 + 2] == 0xFF000000,
+          "tinting a light body colours the fill and keeps the outline");
+    Check(DetectDarkInk(makeRing(0xFFFFFFFF, 0xFF000000), 9, 9),
+          "a black fill inside a white outline is a dark body");
+    Check(!DetectDarkInk(std::vector<DWORD>(16, 0xFF000000), 4, 4),
+          "a shape with no visible outline is treated as a light body, so tinting cannot invert it");
+
     // 自造多尺寸 .cur：每一帧都有不同的像素/热点，不能靠把小帧放大蒙混过关。
     wchar_t tempDirectory[MAX_PATH] = {}, tempFile[MAX_PATH] = {};
     Check(GetTempPathW(MAX_PATH, tempDirectory) != 0 &&
@@ -601,12 +622,12 @@ static void TestCursor() {
     setCursorCalls = 0;
     InitializeCursorTint();
     Check(winEventHooks == 1, "a foreground hook is registered at startup");
-    Check(setCursorCalls == std::size(kCursorIds), "every cursor slot is tinted at startup");
+    Check(setCursorCalls == std::size(kSlots), "every cursor slot is tinted at startup");
 
     Check(lastCursorWidth == 72 && lastCursorHeight == 72,
           "48px accessibility size at 150% DPI installs a native 72px cursor");
 
-    for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+    for (size_t i = 0; i < std::size(kSlots); ++i) {
         g_sources[i].darkInk = false;
         g_sources[i].pixels.assign(static_cast<size_t>(g_sources[i].width) * g_sources[i].height,
                                     0xFFFFFFFF);  // 白体，上色后应该正好是目标色
@@ -614,7 +635,7 @@ static void TestCursor() {
 
     setCursorCalls = 0;
     ApplyTint(true);
-    Check(setCursorCalls == std::size(kCursorIds), "switching to Chinese repaints every slot");
+    Check(setCursorCalls == std::size(kSlots), "switching to Chinese repaints every slot");
     Check(LooksTinted(lastCursorPixels, kChineseColor), "the slots now hold the Chinese colour");
 
     setCursorCalls = 0;
@@ -623,22 +644,36 @@ static void TestCursor() {
 
     setCursorCalls = 0;
     ApplyTint(false);
-    Check(setCursorCalls == std::size(kCursorIds) && LooksTinted(lastCursorPixels, kEnglishColor),
+    Check(setCursorCalls == std::size(kSlots) && LooksTinted(lastCursorPixels, kEnglishColor),
           "switching back repaints in the English colour");
 
     setCursorCalls = 0;
     SetCursorTintPercent(0);
-    Check(setCursorCalls == std::size(kCursorIds),
+    Check(setCursorCalls == std::size(kSlots),
           "sliding to 0% puts the untouched cursors back");
     Check(g_applied == Tint::None, "nothing stays applied at 0%");
     SetCursorTintPercent(0);
-    Check(setCursorCalls == std::size(kCursorIds), "repeated zero does not replace system cursors again");
+    Check(setCursorCalls == std::size(kSlots), "repeated zero does not replace system cursors again");
     setCursorCalls = 0;
     ApplyTint(true);
     Check(setCursorCalls == 0, "at 0% the system cursors are never touched");
 
     SetCursorTintPercent(60);
-    Check(setCursorCalls == std::size(kCursorIds), "leaving 0% tints right away");
+    Check(setCursorCalls == std::size(kSlots), "leaving 0% tints right away");
+
+    // 总开关：关掉立刻还原；关着时滑块再动也不碰系统光标；打开马上重新上色。
+    setCursorCalls = 0;
+    SetCursorTintEnabled(false);
+    Check(setCursorCalls == std::size(kSlots) && g_applied == Tint::None,
+          "turning the master switch off puts the originals back");
+    setCursorCalls = 0;
+    SetCursorTintPercent(80);
+    Check(setCursorCalls == 0, "the slider does nothing while the master switch is off");
+    SetCursorTintEnabled(false);
+    Check(setCursorCalls == 0, "turning it off twice does not touch the cursors again");
+    setCursorCalls = 0;
+    SetCursorTintEnabled(true);
+    Check(setCursorCalls == std::size(kSlots), "turning the master switch back on tints right away");
 
     Check(lastCursorWidth == 72, "re-enabling also uses the native physical size");
     const auto originalPixels = g_sources[0].pixels;
@@ -646,7 +681,7 @@ static void TestCursor() {
         cursorDpi = dpi;
         setCursorCalls = 0;
         ApplyTint(false);
-        Check(setCursorCalls == std::size(kCursorIds) && lastCursorWidth == MulDiv(48, dpi, 96),
+        Check(setCursorCalls == std::size(kSlots) && lastCursorWidth == MulDiv(48, dpi, 96),
               "moving between monitor DPIs rebuilds the cursor even without an IME change");
     }
     Check(g_sources[0].pixels == originalPixels, "DPI rebuilds never tint an already tinted source");
@@ -656,11 +691,11 @@ static void TestCursor() {
     highContrast = true;
     setCursorCalls = 0;
     ApplyTint(true);
-    Check(setCursorCalls == std::size(kCursorIds) && g_applied == Tint::None &&
+    Check(setCursorCalls == std::size(kSlots) && g_applied == Tint::None &&
               lastCursorPixels == nativePixels[1] && lastCursorWidth == 72 &&
               lastCursorX == 10 && lastCursorY == 14, "high contrast restores exact original cursor");
     ApplyTint(false);
-    Check(setCursorCalls == std::size(kCursorIds), "high contrast does not keep replacing cursors");
+    Check(setCursorCalls == std::size(kSlots), "high contrast does not keep replacing cursors");
     highContrast = false;
     ApplyTint(true);
 
@@ -693,13 +728,76 @@ static void TestStartupTaskXml() {
     std::puts("PASS: startup task XML");
 }
 
+static void TestSettingsFile() {
+    // 设置存在 exe 旁边的 ini 里：缺失或写坏的项退回默认值，并把文件重写成合法内容。
+    const wchar_t* path = IniPath();
+    Check(path != nullptr && wcslen(path) > 0, "the ini path comes from the exe location");
+    DeleteFileW(path);
+
+    g_enabled = false;  // 先掰成非默认，确认确实是加载把它改回来的
+    g_altPassThrough = false;
+    g_cursorTintEnabled = false;
+    g_cursorTintPercent = 7;
+    LoadSettings();
+    Check(g_enabled.load() == kDefaultEnabled && g_altPassThrough.load() == kDefaultAltPassThrough &&
+              g_cursorTintEnabled.load() == kDefaultCursorTintEnabled &&
+              g_cursorTintPercent.load() == kDefaultCursorTintPercent,
+          "a missing ini falls back to the defaults");
+    Check(GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES,
+          "a missing ini is written out with the defaults");
+
+    // 合法值原样读回。
+    WritePrivateProfileStringW(L"General", L"MappingEnabled", L"0", path);
+    WritePrivateProfileStringW(L"General", L"AltCapsLockPassThrough", L"0", path);
+    WritePrivateProfileStringW(L"General", L"CursorTintEnabled", L"0", path);
+    WritePrivateProfileStringW(L"General", L"CursorTintPercent", L"35", path);
+    LoadSettings();
+    Check(!g_enabled.load() && !g_altPassThrough.load() && !g_cursorTintEnabled.load() &&
+              g_cursorTintPercent.load() == 35,
+          "valid ini values load back");
+
+    // 只坏一项时，坏项回默认，别的好值留着。
+    WritePrivateProfileStringW(L"General", L"MappingEnabled", L"0", path);
+    WritePrivateProfileStringW(L"General", L"CursorTintPercent", L"abc", path);
+    LoadSettings();
+    Check(!g_enabled.load() && g_cursorTintPercent.load() == kDefaultCursorTintPercent,
+          "only the broken item falls back to its default");
+    wchar_t text[32] = {};
+    GetPrivateProfileStringW(L"General", L"CursorTintPercent", L"", text, 32, path);
+    Check(wcscmp(text, L"100") == 0, "the broken ini is rewritten with valid content");
+
+    // 越界、空文件、全是垃圾，都退回默认。
+    for (const wchar_t* bad : { L"101", L"-1", L"", L"50x", L"99999999999999999999" }) {
+        WritePrivateProfileStringW(L"General", L"CursorTintPercent", bad, path);
+        LoadSettings();
+        Check(g_cursorTintPercent.load() == kDefaultCursorTintPercent,
+              "an out-of-range or unparsable value falls back to its default");
+    }
+    for (const wchar_t* bad : { L"2", L"true", L"" }) {
+        WritePrivateProfileStringW(L"General", L"CursorTintEnabled", bad, path);
+        LoadSettings();
+        Check(g_cursorTintEnabled.load() == kDefaultCursorTintEnabled,
+              "a flag only accepts 0 or 1");
+    }
+    DeleteFileW(path);
+    Check(GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES, "no ini is left behind");
+
+    g_enabled = kDefaultEnabled;
+    g_altPassThrough = kDefaultAltPassThrough;
+    g_cursorTintEnabled = kDefaultCursorTintEnabled;
+    g_cursorTintPercent = kDefaultCursorTintPercent;
+    std::puts("PASS: settings ini, broken values fall back and are rewritten");
+}
+
 int main() {
     _RTC_SetErrorFunc(OnRuntimeCheckFailure);
+    BuildPaths();  // 设置文件路径跟着 exe 走
     TestKeyboard();
     TestHookThread();
     TestRendering();
     TestCursor();
     TestStartupTaskXml();
+    TestSettingsFile();
     std::puts("All regression checks passed.");
     return 0;
 }

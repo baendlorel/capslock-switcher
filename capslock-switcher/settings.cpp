@@ -24,6 +24,7 @@ constexpr int kIdChkAlt = 102;
 constexpr int kIdChkStartup = 103;
 constexpr int kIdOpenLog = 104;
 constexpr int kIdSldCursor = 105;
+constexpr int kIdChkCursorTint = 106;
 
 constexpr UINT_PTR kTimerRefresh = 1;
 constexpr UINT kRefreshMs = 1000;
@@ -39,6 +40,7 @@ constexpr ULONGLONG kStartupPendingMs = 20000;
 HWND g_wnd = nullptr;
 HWND g_chkMapping = nullptr;
 HWND g_chkAlt = nullptr;
+HWND g_chkCursorTint = nullptr;
 HWND g_txtCursor = nullptr;
 HWND g_sldCursor = nullptr;
 HWND g_chkStartup = nullptr;
@@ -169,6 +171,10 @@ void CreateControls(const HWND wnd) {
 	    0, L"BUTTON", L"Alt+CapsLock = 原来的大写锁定",
 	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
 	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkAlt)), g_hInst, nullptr);
+	g_chkCursorTint = CreateWindowExW(
+	    0, L"BUTTON", L"鼠标指针跟着中英文变色 (中文红 / 英文蓝)",
+	    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, wnd,
+	    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkCursorTint)), g_hInst, nullptr);
 	g_txtCursor = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, wnd,
 	                              nullptr, g_hInst, nullptr);
 	g_sldCursor = CreateWindowExW(
@@ -214,6 +220,8 @@ void LayoutChildren(const HWND wnd) {
 	y += row;
 	MoveWindow(g_chkAlt, margin, y, inner, row, TRUE);
 	y += row;
+	MoveWindow(g_chkCursorTint, margin, y, inner, row, TRUE);
+	y += row;
 	MoveWindow(g_txtCursor, margin, y, inner, row, TRUE);
 	y += row;
 	MoveWindow(g_sldCursor, margin, y, inner, sliderH, TRUE);
@@ -234,11 +242,18 @@ void SyncControls() {
 		SendMessageW(g_chkAlt, BM_SETCHECK,
 		             g_altPassThrough.load() ? BST_CHECKED : BST_UNCHECKED, 0);
 	}
+	if (g_chkCursorTint != nullptr) {
+		SendMessageW(g_chkCursorTint, BM_SETCHECK,
+		             g_cursorTintEnabled.load() ? BST_CHECKED : BST_UNCHECKED, 0);
+	}
+	// 总开关关掉时滑块变灰、点不动，浓度值本身留着，重新打开还是原来的档位。
+	if (g_sldCursor != nullptr) {
+		EnableWindow(g_sldCursor, g_cursorTintEnabled.load() ? TRUE : FALSE);
+	}
 	if (g_txtCursor != nullptr && g_shownCursorPercent != g_cursorTintPercent.load()) {
 		g_shownCursorPercent = g_cursorTintPercent.load();
 		wchar_t text[80] = {};
-		swprintf_s(text, L"鼠标指针跟着中英文变色 (中文红 / 英文蓝)：%d%%",
-		           g_shownCursorPercent);
+		swprintf_s(text, L"颜色浓度：%d%%", g_shownCursorPercent);
 		SetWindowTextW(g_txtCursor, text);
 	}
 	if (g_chkStartup == nullptr) {
@@ -346,6 +361,10 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 		case kIdChkAlt:
 			SetAltCapsLockEnabled(SendMessageW(g_chkAlt, BM_GETCHECK, 0, 0) == BST_CHECKED);
 			return 0;
+		case kIdChkCursorTint:
+			SetCursorTintEnabled(SendMessageW(g_chkCursorTint, BM_GETCHECK, 0, 0) == BST_CHECKED);
+			SyncControls();
+			return 0;
 		case kIdChkStartup:
 			g_startupPending = true;
 			g_startupPendingUntil = GetTickCount64() + kStartupPendingMs;
@@ -375,6 +394,88 @@ LRESULT CALLBACK SettingsProc(const HWND hwnd, const UINT message, const WPARAM 
 }
 
 }  // 匿名命名空间
+
+namespace {
+
+constexpr wchar_t kIniSection[] = L"General";
+
+// 绿色版：设置就放在 exe 旁边，换目录不用改注册表。路径在第一次用到时算一次。
+const wchar_t* IniPath() {
+	static wchar_t path[MAX_PATH] = {};
+	if (path[0] != L'\0') {
+		return path;
+	}
+	const wchar_t* exe = ExePath();
+	const size_t length = wcslen(exe);
+	if (length == 0 || length + 5 >= _countof(path)) {
+		return L"";  // 路径都拼不出来的话，读写自然全部失败，设置只是不落盘
+	}
+	wcscpy_s(path, exe);
+	if (wchar_t* dot = wcsrchr(path, L'.')) {
+		*dot = L'\0';  // 把 .exe 换成 .ini
+	}
+	wcscat_s(path, L".ini");
+	return path;
+}
+
+// 只接受整数，而且必须整数完整占满整个值：多一个字符就算写坏了。
+bool ReadIniInt(const wchar_t* key, const int low, const int high, int& out) {
+	wchar_t text[32] = {};
+	GetPrivateProfileStringW(kIniSection, key, L"", text, _countof(text), IniPath());
+	wchar_t* end = nullptr;
+	const long value = wcstol(text, &end, 10);
+	if (end == text || *end != L'\0' || value < low || value > high) {
+		return false;
+	}
+	out = static_cast<int>(value);
+	return true;
+}
+
+}  // 匿名命名空间
+
+void SaveSettings() {
+	struct Entry {
+		const wchar_t* key;
+		int value;
+	};
+	const Entry entries[] = {
+		{ L"MappingEnabled", g_enabled.load() ? 1 : 0 },
+		{ L"AltCapsLockPassThrough", g_altPassThrough.load() ? 1 : 0 },
+		{ L"CursorTintEnabled", g_cursorTintEnabled.load() ? 1 : 0 },
+		{ L"CursorTintPercent", g_cursorTintPercent.load() },
+	};
+	for (const Entry& entry : entries) {
+		wchar_t text[8] = {};
+		swprintf_s(text, L"%d", entry.value);
+		if (WritePrivateProfileStringW(kIniSection, entry.key, text, IniPath()) == FALSE) {
+			Log(L"设置写不进 %s（%lu）", IniPath(), GetLastError());
+			return;
+		}
+	}
+}
+
+// 逐项读；哪一项缺失或写坏了就用默认值顶上，并立刻把整份文件重写成合法内容，
+// 免得以后每次启动都走一遍修复。
+void LoadSettings() {
+	int mapping = kDefaultEnabled ? 1 : 0;
+	int alt = kDefaultAltPassThrough ? 1 : 0;
+	int tint = kDefaultCursorTintEnabled ? 1 : 0;
+	int percent = kDefaultCursorTintPercent;
+	const bool valid = ReadIniInt(L"MappingEnabled", 0, 1, mapping) &
+	                   ReadIniInt(L"AltCapsLockPassThrough", 0, 1, alt) &
+	                   ReadIniInt(L"CursorTintEnabled", 0, 1, tint) &
+	                   ReadIniInt(L"CursorTintPercent", 0, 100, percent);
+	g_enabled = mapping != 0;
+	g_altPassThrough = alt != 0;
+	g_cursorTintEnabled = tint != 0;
+	g_cursorTintPercent = percent;
+	if (valid) {
+		return;
+	}
+	Log(L"设置文件缺失或写坏了，已用默认值覆盖：%s", IniPath());
+	DeleteFileW(IniPath());
+	SaveSettings();
+}
 
 void CreateSettingsWindow(const HINSTANCE instance) {
 	WNDCLASSEX wcex = {};

@@ -111,16 +111,16 @@ void ShowBalloon(const wchar_t* text) {
 	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
+// 开关只改状态和落盘，不弹气泡：设置页里点一下不该再冒出提示。
 void SetMappingEnabled(const bool enabled) {
 	g_enabled = enabled;
 	UpdateTrayTooltip();
-	ShowBalloon(enabled ? L"CapsLock \u6620\u5C04\u5DF2\u542F\u7528"
-	                    : L"CapsLock \u6620\u5C04\u5DF2\u7981\u7528");
+	SaveSettings();
 }
 
 void SetAltCapsLockEnabled(const bool enabled) {
 	g_altPassThrough = enabled;
-	ShowBalloon(enabled ? L"Alt+CapsLock\uFF1A\u653E\u884C\u5927\u5199\u9501\u5B9A" : L"Alt+CapsLock\uFF1A\u5DF2\u5173\u95ED");
+	SaveSettings();
 }
 
 // 右键菜单：开关都在设置页里，这里只留版本号、打开设置和退出。

@@ -49,16 +49,17 @@ HINSTANCE g_hInst = nullptr;
 HWND g_mainWnd = nullptr;
 
 // 托盘菜单和设置页共同控制的"启用映射"开关。
-std::atomic_bool g_enabled{ true };
+std::atomic_bool g_enabled{ kDefaultEnabled };
 
 // 缓存"登录任务装没装"的答案，启动时和每次改动之后刷新。
 bool g_startupTaskInstalled = false;
 
 // Alt+CapsLock 放行给原来的大写锁定（默认开）。
-std::atomic_bool g_altPassThrough{ true };
+std::atomic_bool g_altPassThrough{ kDefaultAltPassThrough };
 
-// 鼠标指针跟着中英文变色（默认满格 100%）。
-std::atomic_int g_cursorTintPercent{ 100 };
+// 鼠标指针跟着中英文变色（默认开，满格 100%）。
+std::atomic_bool g_cursorTintEnabled{ kDefaultCursorTintEnabled };
+std::atomic_int g_cursorTintPercent{ kDefaultCursorTintPercent };
 
 namespace {
 
@@ -307,6 +308,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	BuildPaths();
+	LoadSettings();  // exe 旁边的 ini；文件缺失或写坏时在这里用默认值覆盖
 
 	// 要在任何窗口或屏幕 DC 出现之前调用，这样启动画面和由 DPI 算出的
 	// 尺寸都工作在真实的屏幕像素上。

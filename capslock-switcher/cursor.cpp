@@ -3,8 +3,8 @@
 #include "app.h"
 #include "banner.h"
 #include "logging.h"
+#include "settings.h"
 #include "surface.h"
-#include "tray.h"
 
 #include <algorithm>
 #include <climits>
@@ -13,13 +13,22 @@
 
 namespace {
 
-// 染哪几个光标槽。等待/后台等待是 .ani 动画光标，换成静止的一帧看着像卡死，不碰。
-// winuser.h 里 OCR_* 被 OEMRESOURCE 包着、IDC_* 又是 MAKEINTRESOURCE 指针，
-// 所以直接写数字（和 banner.cpp 里手写 IMC_GETCONVERSIONMODE 是同一个做法）。
-constexpr DWORD kCursorIds[] = {
-	32512,  // OCR_NORMAL：箭头
-	32513,  // OCR_IBEAM：文本 I 型
-	32649,  // OCR_HAND：链接手型
+// 染哪些光标槽：槽号 + 注册表 Control Panel\Cursors 下的值名。等待/后台等待是 .ani
+// 动画光标，换成静止的一帧看着像卡死，不碰。winuser.h 里 OCR_* 被 OEMRESOURCE 包着、
+// IDC_* 又是 MAKEINTRESOURCE 指针，所以槽号直接写数字（和 banner.cpp 里手写
+// IMC_GETCONVERSIONMODE 是同一个做法）。
+struct CursorSlot {
+	DWORD id;
+	const wchar_t* name;
+};
+
+constexpr CursorSlot kSlots[] = {
+	{ 32512, L"Arrow" },      // OCR_NORMAL：箭头
+	{ 32513, L"IBeam" },      // OCR_IBEAM：文本 I 型
+	{ 32649, L"Hand" },       // OCR_HAND：链接手型
+	{ 32515, L"Crosshair" },  // OCR_CROSS：十字
+	{ 32644, L"SizeWE" },     // OCR_SIZEWE：横向拉伸
+	{ 32645, L"SizeNS" },     // OCR_SIZENS：纵向拉伸
 };
 
 constexpr UINT kSettleMs = 50;         // 和横幅一样：等目标窗口先吃下这次切换
@@ -44,7 +53,7 @@ enum class Tint {
 	English,
 };
 
-CursorSource g_sources[std::size(kCursorIds)];
+CursorSource g_sources[std::size(kSlots)];
 Tint g_applied = Tint::None;  // 系统光标槽现在被染成什么样
 Tint g_target = Tint::None;   // 想要的颜色，重刷时直接用，不用再探测
 HWINEVENTHOOK g_foregroundHook = nullptr;
@@ -52,9 +61,9 @@ ULONGLONG g_lastProbeTick = 0;
 unsigned g_pollTicks = 0;
 int g_sourceDpi = 0;
 
-// 0% 就是"不变"：这时和以前关掉那个开关是一回事，系统光标保持用户自己的样子。
+// 总开关关掉、或者浓度滑到 0，都等于"不变"：系统光标保持用户自己的样子。
 bool TintOn() {
-	return g_cursorTintPercent.load() > 0;
+	return g_cursorTintEnabled.load() && g_cursorTintPercent.load() > 0;
 }
 
 int Luma(const DWORD px) {
@@ -63,19 +72,31 @@ int Luma(const DWORD px) {
 	                        1000);
 }
 
-// 本体是亮还是暗。Win10/11 默认箭头是"白体黑边"，也有方案是"黑体白边"，
-// 上色的方向正好相反，所以先看一眼再决定。
-bool DetectDarkInk(const std::vector<DWORD>& pixels) {
-	long long sum = 0;
-	int count = 0;
-	for (const DWORD px : pixels) {
-		if ((px >> 24) < 200) {
-			continue;
+// 本体是亮还是暗。光标的画法是"填充 + 描边"，描边在最外圈，所以贴着透明的那一圈
+// 是什么色，本体就是反过来的那个。不能看整张图的平均亮度：I 型、十字这类细长形状的
+// 白色填充面积小，平均下来会被黑描边压过去，方向就反了（结果只有描边在变色）。
+bool DetectDarkInk(const std::vector<DWORD>& pixels, const int width, const int height) {
+	const auto opaque = [&](const int x, const int y) {
+		return x >= 0 && y >= 0 && x < width && y < height &&
+		       (pixels[static_cast<size_t>(y) * width + x] >> 24) >= 200;
+	};
+	long long edgeLuma = 0;
+	int edgeCount = 0;
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			const DWORD px = pixels[static_cast<size_t>(y) * width + x];
+			if ((px >> 24) < 200) {
+				continue;
+			}
+			if (opaque(x - 1, y) && opaque(x + 1, y) && opaque(x, y - 1) && opaque(x, y + 1)) {
+				continue;  // 四面被包住的像素属于填充，不是描边
+			}
+			edgeLuma += Luma(px);
+			++edgeCount;
 		}
-		sum += Luma(px);
-		++count;
 	}
-	return count > 0 && sum / count < 128;
+	// 描边亮 → 本体暗。没有描边可见时按亮体处理，最坏也只是不染，不会染错方向。
+	return edgeCount > 0 && edgeLuma / edgeCount >= 128;
 }
 
 // 保形上色：本体朝目标色靠拢，另一头的描边保持原样。
@@ -345,7 +366,7 @@ bool DecodeCursor(const wchar_t* path, const int size, CursorSource& out) {
 	    out.width, out.height, info.xHotspot, info.yHotspot, path);
 	out.xHotspot = info.xHotspot;
 	out.yHotspot = info.yHotspot;
-	out.darkInk = DetectDarkInk(out.pixels);
+	out.darkInk = DetectDarkInk(out.pixels, out.width, out.height);
 	out.ready = true;
 	return true;
 }
@@ -361,12 +382,12 @@ bool HighContrastOn() {
 
 // 原始 .cur 字节也走双帧提交，避免还原时再次被 SetSystemCursor 缩小再放大。
 void RestoreSourceCursors() {
-	for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+	for (size_t i = 0; i < std::size(kSlots); ++i) {
 		if (!g_sources[i].ready) {
 			continue;
 		}
 		const HCURSOR cursor = PackCursor(g_sources[i], nullptr);
-		if (cursor != nullptr && SetSystemCursor(cursor, kCursorIds[i]) == FALSE) {
+		if (cursor != nullptr && SetSystemCursor(cursor, kSlots[i].id) == FALSE) {
 			DestroyCursor(cursor);
 		}
 	}
@@ -376,7 +397,6 @@ void RestoreSourceCursors() {
 // 物理尺寸 = 用户的基础指针大小 × 鼠标所在显示器的 DPI，绝不是 SM_CXCURSOR。
 // 每次从磁盘读原图，强杀残留、部分着色和跨屏重建都不会在旧颜色上继续加工。
 void RebuildSources(const int dpi) {
-	constexpr const wchar_t* names[] = { L"Arrow", L"IBeam", L"Hand" };
 	DWORD baseSize = 32;
 	DWORD bytes = sizeof(baseSize);
 	RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", L"CursorBaseSize",
@@ -386,15 +406,15 @@ void RebuildSources(const int dpi) {
 	}
 	const int size = MulDiv(static_cast<int>(baseSize), dpi, 96);
 	Log(L"cursor: 基础大小 %lu，DPI %d，目标 %dpx", baseSize, dpi, size);
-	for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+	for (size_t i = 0; i < std::size(kSlots); ++i) {
 		g_sources[i] = CursorSource{};
 		wchar_t path[32768] = {};
 		bytes = sizeof(path);
-		if (RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", names[i],
+		if (RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", kSlots[i].name,
 		                 RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
 		                 nullptr, path, &bytes) != ERROR_SUCCESS ||
 		    !DecodeCursor(path, size, g_sources[i])) {
-			Log(L"cursor: 槽 %lu 无可用静态方案文件，保持原样", kCursorIds[i]);
+			Log(L"cursor: 槽 %lu 无可用静态方案文件，保持原样", kSlots[i].id);
 		}
 	}
 	g_sourceDpi = dpi;
@@ -423,7 +443,7 @@ void ApplyTint(const bool chinese) {
 	}
 	const COLORREF color = chinese ? kChineseColor : kEnglishColor;
 	bool applied = false;
-	for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+	for (size_t i = 0; i < std::size(kSlots); ++i) {
 		if (!g_sources[i].ready) {
 			continue;
 		}
@@ -434,9 +454,9 @@ void ApplyTint(const bool chinese) {
 		if (cursor == nullptr) {
 			continue;
 		}
-		if (SetSystemCursor(cursor, kCursorIds[i]) == FALSE) {
+		if (SetSystemCursor(cursor, kSlots[i].id) == FALSE) {
 			DestroyCursor(cursor);  // 没送出去就还是我们的，得自己毁掉
-			Log(L"cursor: 替换系统光标 %lu 失败（%lu）", kCursorIds[i], GetLastError());
+			Log(L"cursor: 替换系统光标 %lu 失败（%lu）", kSlots[i].id, GetLastError());
 			continue;
 		}
 		applied = true;
@@ -532,13 +552,10 @@ void DestroyCursorTint() {
 	g_sourceDpi = 0;
 }
 
-void SetCursorTintPercent(const int percent) {
-	const int wanted = percent < 0 ? 0 : percent > 100 ? 100 : percent;
-	const bool wasOn = TintOn();
-	g_cursorTintPercent = wanted;
-
-	if (wanted == 0) {
-		// 0% 就是不变：把系统光标还回去，轮询也停掉，和以前关掉那个开关一样。
+// 总开关或浓度改动之后，让系统光标跟上新状态。wasOn 是改动前的状态：
+// 从关到开要重新读方案文件并起轮询，从开到关要把原图装回去。
+void SyncCursorTint(const bool wasOn) {
+	if (!TintOn()) {
 		if (g_mainWnd != nullptr) {
 			KillTimer(g_mainWnd, kTimerCursorSettle);
 			KillTimer(g_mainWnd, kTimerCursorPoll);
@@ -546,20 +563,30 @@ void SetCursorTintPercent(const int percent) {
 		if (wasOn) {
 			RestoreSourceCursors();
 		}
-		ShowBalloon(L"鼠标指针不再跟着中英文变色");
 		return;
 	}
-
 	if (!wasOn) {
-		g_sourceDpi = 0;  // 关闭期间可能换过方案，下次上色重新读文件
+		g_sourceDpi = 0;  // 关掉的这段时间可能换过方案，重新打开时重新读文件
 		if (g_mainWnd != nullptr) {
 			SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
 		}
 		g_lastProbeTick = GetTickCount64();
-		ShowBalloon(L"鼠标指针跟着中英文变色");
 	}
-
-	// 百分比变了，槽里贴着的旧颜色就不作数了，重刷一遍。
+	// 开关或浓度变了，槽里贴着的旧颜色就不作数了，重刷一遍。
 	g_applied = Tint::None;
 	ApplyTint(CurrentInputIsChinese());
+}
+
+void SetCursorTintPercent(const int percent) {
+	const bool wasOn = TintOn();
+	g_cursorTintPercent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	SyncCursorTint(wasOn);
+	SaveSettings();
+}
+
+void SetCursorTintEnabled(const bool enabled) {
+	const bool wasOn = TintOn();
+	g_cursorTintEnabled = enabled;
+	SyncCursorTint(wasOn);
+	SaveSettings();
 }

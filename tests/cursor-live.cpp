@@ -10,10 +10,12 @@
 
 HINSTANCE g_hInst = nullptr;
 HWND g_mainWnd = nullptr;
+std::atomic_bool g_cursorTintEnabled{ true };
 std::atomic_int g_cursorTintPercent{ 100 };
 bool CurrentInputIsChinese(DWORD) { return false; }
 void ShowBalloon(const wchar_t*) {}
 void Log(const wchar_t*, ...) {}
+void SaveSettings() {}  // 这个探针不改设置文件
 
 int main() {
     EnableDpiAwareness();
@@ -27,14 +29,14 @@ int main() {
         for (const bool chinese : { false, true }) {
             g_applied = Tint::None;
             ApplyTint(chinese);
-            for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+            for (size_t i = 0; i < std::size(kSlots); ++i) {
                 const auto& source = g_sources[i];
                 auto expected = source.pixels;
                 TintPixels(expected.data(), expected.size(), chinese ? kChineseColor : kEnglishColor,
                            source.darkInk, percent);
                 ICONINFO info = {};
                 CursorSource actual;
-                const bool read = GetIconInfo(LoadCursorW(nullptr, MAKEINTRESOURCEW(kCursorIds[i])), &info) &&
+                const bool read = GetIconInfo(LoadCursorW(nullptr, MAKEINTRESOURCEW(kSlots[i].id)), &info) &&
                                   ReadColorPixels(info.hbmColor, actual);
                 DeleteObject(info.hbmColor);
                 DeleteObject(info.hbmMask);
@@ -42,17 +44,17 @@ int main() {
                     actual.width == source.width && actual.height == source.height &&
                     info.xHotspot == source.xHotspot && info.yHotspot == source.yHotspot;
                 std::printf("%s: live slot=%lu size=%dx%d Chinese=%d intensity=%d%% pixels/alpha/hotspot\n",
-                            exact ? "PASS" : "FAIL", kCursorIds[i], actual.width, actual.height, chinese, percent);
+                            exact ? "PASS" : "FAIL", kSlots[i].id, actual.width, actual.height, chinese, percent);
                 if (!exact) { result = 1; }
             }
         }
     }
     // 即使比较失败，也继续还原，不通过 exit/assert 提前离开染色状态。
     RestoreSourceCursors();
-    for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+    for (size_t i = 0; i < std::size(kSlots); ++i) {
         ICONINFO info = {};
         CursorSource actual;
-        const bool read = GetIconInfo(LoadCursorW(nullptr, MAKEINTRESOURCEW(kCursorIds[i])), &info) &&
+        const bool read = GetIconInfo(LoadCursorW(nullptr, MAKEINTRESOURCEW(kSlots[i].id)), &info) &&
                           ReadColorPixels(info.hbmColor, actual);
         DeleteObject(info.hbmColor);
         DeleteObject(info.hbmMask);
@@ -61,7 +63,7 @@ int main() {
             actual.width == source.width && actual.height == source.height &&
             info.xHotspot == source.xHotspot && info.yHotspot == source.yHotspot;
         std::printf("%s: restore slot=%lu size=%dx%d original pixels/alpha/hotspot\n",
-                    exact ? "PASS" : "FAIL", kCursorIds[i], actual.width, actual.height);
+                    exact ? "PASS" : "FAIL", kSlots[i].id, actual.width, actual.height);
         if (!exact) {
             std::printf("detail: ready=%d read=%d pixels=%d expected=%dx%d hotspot=%lu,%lu actual=%lu,%lu\n",
                         source.ready, read, actual.pixels == source.pixels, source.width, source.height,
