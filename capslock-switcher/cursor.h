@@ -5,14 +5,15 @@
 // 鼠标指针跟着中英文状态变色：中文红、英文蓝，跟中央横幅同一份颜色；滑块控制程度，
 // 100% 是完整颜色，0% 就是不变。
 //
-// 实现是 SetSystemCursor 逐个替换系统光标槽（箭头、I 型、手型）。那是**会话级的
-// 全局修改**，不是只改我们自己的窗口：所有程序都会看到新指针，而且进程被强杀时
-// 不会自动还原。所以这里有一套兜底：
-//   - 正常退出、滑到 0%：立刻把系统光标还原成用户自己的方案；
-//   - 启动时先重载一遍用户方案，把上一次强杀留下的颜色冲掉；
-//   - 每 10 秒无条件重刷一次（Windows 偶尔会自己重载光标方案，把颜色冲掉）。
-// 已知边界：自带光标的应用（Photoshop、游戏之类）盖不住；开了高对比度时不染。
-void InitializeCursorTint();     // WM_CREATE：自愈 + 解码光标 + 挂前台事件 + 首次上色
+// SetSystemCursor 替换的是会话级的箭头、I 型和手型，所有使用系统光标的应用都会受影响。
+// 原图只读注册表方案指向的 .cur 文件：按用户基础大小 × 当前显示器 DPI 选原生帧，
+// 直接用 CreateIconFromResourceEx 解码，避免 LoadCursor/LoadImage 取小帧再放大。
+// 滑块只改预乘 RGB，alpha/热点不动；跨屏 DPI 变化时从文件重建，不加工已染色的系统槽。
+// 提交用两帧完全相同的 ANI（视觉静止），绕开 SetSystemCursor 对静态光标的二次缩放。
+// 正常退出、滑到 0%：原 .cur 字节同样双帧提交，保留掩码/热点；每 10 秒补刷颜色。
+// 强杀不能自动还原，但下次启动仍从干净文件读源，不会累积染色。
+// .ani、没有可读静态文件的槽和自带光标的应用保持原样；高对比度下不染。
+void InitializeCursorTint();     // WM_CREATE：读方案原图 + 挂前台事件 + 首次上色
 void CursorSwitchSettle();       // WM_SWITCH_IME：起 50ms 去抖，等 Ctrl+Space 先生效
 void CursorSettleTick();         // 主窗口 WM_TIMER(kTimerCursorSettle)
 void CursorPollTick();           // 主窗口 WM_TIMER(kTimerCursorPoll)

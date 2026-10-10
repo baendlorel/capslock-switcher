@@ -28,6 +28,23 @@
 
 #include <atomic>
 
+#ifdef _DEBUG
+#include <cstdio>
+#include <rtcapi.h>  // /RTC1 的报错回调
+
+// Release 版没有运行时检查。Debug 版有，而且发现问题时默认弹一个模态对话框——这是个托盘
+// 程序，主窗口是隐藏的，定时器会一遍遍撞上同一个问题，弹幕一样糊满屏幕。改成写日志后退出。
+static int __cdecl OnRuntimeCheckFailure(int, const char* fileName, int line, const char* module,
+                                         const char* format, ...) {
+	wchar_t text[512] = {};
+	swprintf_s(text, L"/RTC1 检查失败：%hs (%hs:%d, %hs)", format != nullptr ? format : "?",
+	           fileName != nullptr ? fileName : "?", line, module != nullptr ? module : "?");
+	Log(text);
+	ExitProcess(1);
+	return 0;
+}
+#endif
+
 HINSTANCE g_hInst = nullptr;
 HWND g_mainWnd = nullptr;
 
@@ -270,6 +287,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(nCmdShow);
 	UNREFERENCED_PARAMETER(lpCmdLine);
+
+#ifdef _DEBUG
+	_RTC_SetErrorFunc(OnRuntimeCheckFailure);
+#endif
 
 	// 提权副本必须最先处理：它得避开正在运行的实例的互斥体，
 	// 而且绝不创建窗口。这两个参数由 startup.cpp 提供，

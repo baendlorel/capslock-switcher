@@ -2,11 +2,25 @@
 // 不会注入任何按键，也不会安装全局键盘钩子。
 #define NOMINMAX
 #include <Windows.h>
+#include <rtcapi.h>  // /RTC1 的报错回调：别弹对话框，直接报出来退出
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
 #include <climits>
+#include <string>
+
+// /RTC1 发现问题（比如栈被写坏）时默认弹一个模态对话框，脚本跑起来会一直卡在那儿。
+// 换成打到 stderr 然后退出，回归检查就能干净地失败。
+static int __cdecl OnRuntimeCheckFailure(int, const char* fileName, int line, const char* module,
+                                         const char* format, ...) {
+    std::fprintf(stderr, "RUNTIME CHECK FAILED: ");
+    if (format != nullptr) { std::fputs(format, stderr); }
+    std::fprintf(stderr, " (%s:%d, %s)\n", fileName != nullptr ? fileName : "?", line,
+                 module != nullptr ? module : "?");
+    std::fflush(stderr);
+    std::exit(1);
+}
 
 static bool ctrlHeld = false;
 static bool spaceHeld = false;
@@ -64,10 +78,34 @@ static BOOL WINAPI FakeUnhookWinEvent(HWINEVENTHOOK hook);
 #define SetWinEventHook FakeSetWinEventHook
 #define UnhookWinEvent FakeUnhookWinEvent
 
+static std::wstring cursorFixturePath;
+static DWORD cursorBaseSize = 48;
+static int cursorDpi = 144;
+static bool highContrast = false;
+static LSTATUS WINAPI FakeCursorRegGetValue(HKEY, LPCWSTR, LPCWSTR name, DWORD, LPDWORD,
+                                             PVOID data, LPDWORD bytes) {
+    if (wcscmp(name, L"CursorBaseSize") == 0) {
+        if (*bytes < sizeof(cursorBaseSize)) { return ERROR_MORE_DATA; }
+        CopyMemory(data, &cursorBaseSize, sizeof(cursorBaseSize));
+        *bytes = sizeof(cursorBaseSize);
+    } else {
+        const DWORD needed = static_cast<DWORD>((cursorFixturePath.size() + 1) * sizeof(wchar_t));
+        if (*bytes < needed) { return ERROR_MORE_DATA; }
+        CopyMemory(data, cursorFixturePath.c_str(), needed);
+        *bytes = needed;
+    }
+    return ERROR_SUCCESS;
+}
+static int FakeCursorDpi(HWND, HWND) { return cursorDpi; }
+
 // 各模块的 .cpp 都编进这一个翻译单元，替身才对所有模块都生效。
 #include "../capslock-switcher/main.cpp"
 #include "../capslock-switcher/banner.cpp"
+#define RegGetValueW FakeCursorRegGetValue
+#define ScreenDpi FakeCursorDpi
 #include "../capslock-switcher/cursor.cpp"
+#undef RegGetValueW
+#undef ScreenDpi
 #include "../capslock-switcher/keyboard.cpp"
 #include "../capslock-switcher/logging.cpp"
 #include "../capslock-switcher/settings.cpp"
@@ -94,7 +132,10 @@ static BOOL WINAPI FakeUnhookWinEvent(HWINEVENTHOOK hook);
 static unsigned setCursorCalls = 0;
 static DWORD lastCursorId = 0;
 static std::vector<DWORD> lastCursorPixels;
-static unsigned cursorReloads = 0;  // SPI_SETCURSORS 被调了几次
+static int lastCursorWidth = 0;
+static int lastCursorHeight = 0;
+static DWORD lastCursorX = 0;
+static DWORD lastCursorY = 0;
 static unsigned winEventHooks = 0;
 static unsigned winEventUnhooks = 0;
 
@@ -107,6 +148,10 @@ static BOOL WINAPI FakeSetSystemCursor(HCURSOR cursor, DWORD id) {
         CursorSource source;
         if (ReadColorPixels(info.hbmColor, source)) {
             lastCursorPixels = source.pixels;
+            lastCursorWidth = source.width;
+            lastCursorHeight = source.height;
+            lastCursorX = info.xHotspot;
+            lastCursorY = info.yHotspot;
         }
         DeleteObject(info.hbmColor);
         DeleteObject(info.hbmMask);
@@ -117,10 +162,15 @@ static BOOL WINAPI FakeSetSystemCursor(HCURSOR cursor, DWORD id) {
     return TRUE;
 }
 
-// SPI_SETCURSORS 拦下来计数，别的（比如 surface.cpp 要用的 SPI_GETWORKAREA）转给真函数。
+// 别的 SystemParametersInfo 调用（surface.cpp 要用的 SPI_GETWORKAREA、cursor.cpp 要用的
+// SPI_GETHIGHCONTRAST）转给真函数。
 static BOOL WINAPI FakeSystemParametersInfo(UINT action, UINT param, PVOID data, UINT winIni) {
     if (action == SPI_SETCURSORS) {
-        ++cursorReloads;
+        std::fputs("FAIL: tests must not reload real system cursors\n", stderr);
+        std::exit(1);
+    }
+    if (action == SPI_GETHIGHCONTRAST) {
+        static_cast<HIGHCONTRASTW*>(data)->dwFlags = highContrast ? HCF_HIGHCONTRASTON : 0;
         return TRUE;
     }
     using RealFn = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT);
@@ -398,7 +448,7 @@ static void TestCursor() {
     sample.xHotspot = 2;
     sample.yHotspot = 3;
     sample.pixels.assign(16, 0xFF000000);
-    const HCURSOR packed = PackCursor(sample, sample.pixels);
+    const HCURSOR packed = PackCursor(sample, &sample.pixels);
     ICONINFO packedInfo = {};
     Check(packed != nullptr && GetIconInfo(packed, &packedInfo) != FALSE,
           "a packed cursor can be read back");
@@ -409,25 +459,157 @@ static void TestCursor() {
         DestroyCursor(packed);
     }
 
-    // 真光标长什么样取决于系统（DPI 缩放、用户方案、甚至上一次运行留下的颜色），
-    // 所以解码那条路只查"读得出来"，颜色检查换成一组合成光源来做。
-    CursorSource decoded;
-    Check(DecodeCursor(32512, decoded) && decoded.width > 0 && decoded.height > 0,
-          "the system arrow cursor decodes to something");
+    // 预乘 alpha 的半透明黑体/白边：着色不能使 RGB 超过 alpha 或移动边缘。
+    DWORD edges[3] = { 0x80000000, 0x80808080, 0x40102030 };
+    TintPixels(edges, 3, kChineseColor, true, 100);
+    Check(edges[0] == 0x80801023 && edges[1] == 0x80808080,
+          "dark tint preserves premultiplied antialiased edges");
+    for (const DWORD px : edges) {
+        const DWORD alpha = px >> 24;
+        Check((px & 255) <= alpha && ((px >> 8) & 255) <= alpha && ((px >> 16) & 255) <= alpha,
+              "tint channels never exceed alpha");
+    }
 
+    // 非系统默认大小的单色光标：高度只由 AND/XOR 两半决定；黑色不能被当成透明。
+    MonoBitmapInfo monoInfo = {};
+    monoInfo.header.biSize = sizeof(BITMAPINFOHEADER);
+    monoInfo.header.biWidth = 9;
+    monoInfo.header.biHeight = -14;
+    monoInfo.header.biPlanes = 1;
+    monoInfo.header.biBitCount = 1;
+    monoInfo.colors[1].rgbRed = monoInfo.colors[1].rgbGreen = monoInfo.colors[1].rgbBlue = 255;
+    void* monoBits = nullptr;
+    HBITMAP monoMask = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&monoInfo),
+                                        DIB_RGB_COLORS, &monoBits, nullptr, 0);
+    Check(monoMask != nullptr && monoBits != nullptr, "create monochrome mask fixture");
+    ZeroMemory(monoBits, 4 * 14);
+    FillMemory(monoBits, 4 * 7, 255);
+    static_cast<BYTE*>(monoBits)[0] = 0x7F;
+    static_cast<BYTE*>(monoBits)[4 * 7] = 0x40;
+    CursorSource mono;
+    Check(ReadMonoPixels(monoMask, mono, true) && mono.width == 9 && mono.height == 7 &&
+              mono.pixels[0] == 0xFF000000 && mono.pixels[1] == 0xFFFFFFFF && mono.pixels[2] == 0,
+          "monochrome mask uses its own dimensions and preserves black/inverted/transparent pixels");
+    DeleteObject(monoMask);
+    monoInfo.header.biHeight = -7;
+    monoMask = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&monoInfo),
+                               DIB_RGB_COLORS, &monoBits, nullptr, 0);
+    Check(monoMask != nullptr && monoBits != nullptr, "create colour AND mask fixture");
+    FillMemory(monoBits, 4 * 7, 255);
+    static_cast<BYTE*>(monoBits)[0] = 0x5F;
+    mono.pixels.assign(9 * 7, 0);
+    mono.pixels[2] = 0x007F2020;
+    Check(ReadMonoPixels(monoMask, mono, false) && mono.pixels[0] == 0xFF000000 &&
+              mono.pixels[1] == 0 && mono.pixels[2] == 0xFF7F2020,
+          "a colour cursor without alpha keeps opaque black according to its AND mask");
+    DeleteObject(monoMask);
+
+    // 自造多尺寸 .cur：每一帧都有不同的像素/热点，不能靠把小帧放大蒙混过关。
+    wchar_t tempDirectory[MAX_PATH] = {}, tempFile[MAX_PATH] = {};
+    Check(GetTempPathW(MAX_PATH, tempDirectory) != 0 &&
+              GetTempFileNameW(tempDirectory, L"cur", 0, tempFile) != 0, "create cursor fixture");
+    cursorFixturePath = tempFile;
+    const int sizes[] = { 48, 72, 96, 144, 256 };
+    const WORD header[] = { 0, 2, static_cast<WORD>(std::size(sizes)) };
+    std::vector<BYTE> fixture(sizeof(header) + std::size(sizes) * sizeof(CursorFileEntry));
+    CopyMemory(fixture.data(), header, sizeof(header));
+    std::vector<std::vector<DWORD>> nativePixels;
+    for (size_t f = 0; f < std::size(sizes); ++f) {
+        const int side = sizes[f];
+        const int maskStride = (side + 31) / 32 * 4;
+        BITMAPINFOHEADER dib = {};
+        dib.biSize = sizeof(dib);
+        dib.biWidth = side;
+        dib.biHeight = side * 2;
+        dib.biPlanes = 1;
+        dib.biBitCount = 32;
+        CursorFileEntry entry = {};
+        entry.width = entry.height = static_cast<BYTE>(side == 256 ? 0 : side);
+        entry.xHotspot = static_cast<WORD>(7 + f * 3);
+        entry.yHotspot = static_cast<WORD>(9 + f * 5);
+        entry.offset = static_cast<DWORD>(fixture.size());
+        entry.bytes = sizeof(dib) + side * side * 4 + maskStride * side;
+        CopyMemory(fixture.data() + sizeof(header) + f * sizeof(entry), &entry, sizeof(entry));
+        fixture.resize(fixture.size() + entry.bytes, 0);
+        CopyMemory(fixture.data() + entry.offset, &dib, sizeof(dib));
+        nativePixels.emplace_back(side * side);
+        for (int y = 0; y < side; ++y) {
+            for (int x = 0; x < side; ++x) {
+                const DWORD alpha = (x * 37 + y * 29 + 255) % 256;
+                const DWORD px = (alpha << 24) | ((alpha * static_cast<DWORD>(f + 1) / 5) << 16) |
+                                 ((alpha * x / side) << 8) | alpha * y / side;
+                nativePixels.back()[y * side + x] = px;
+                CopyMemory(fixture.data() + entry.offset + sizeof(dib) +
+                               ((side - 1 - y) * side + x) * 4, &px, sizeof(px));
+            }
+        }
+    }
+    {
+        std::ofstream file(tempFile, std::ios::binary | std::ios::trunc);
+        Check(static_cast<bool>(file.write(reinterpret_cast<const char*>(fixture.data()),
+                                          fixture.size())), "write cursor fixture");
+    }
+    for (size_t f = 0; f < std::size(sizes); ++f) {
+        CursorSource decoded;
+        Check(DecodeCursor(tempFile, sizes[f], decoded), "native cursor frame decodes");
+        Check(decoded.width == sizes[f] && decoded.height == sizes[f] &&
+                  decoded.xHotspot == 7 + f * 3 && decoded.yHotspot == 9 + f * 5,
+              "exact-size frame and its own hotspot are selected");
+        Check(decoded.pixels == nativePixels[f], "native frame is pixel-exact, not a resized bitmap");
+        for (const int percent : { 0, 25, 60, 100 }) {
+            auto pixels = decoded.pixels;
+            TintPixels(pixels.data(), pixels.size(), kChineseColor, decoded.darkInk, percent);
+            const HCURSOR tinted = PackCursor(decoded, &pixels);
+            ICONINFO info = {};
+            CursorSource roundTrip;
+            Check(tinted != nullptr && GetIconInfo(tinted, &info) &&
+                      ReadColorPixels(info.hbmColor, roundTrip), "read back tinted native frame");
+            Check(roundTrip.pixels == pixels && roundTrip.width == sizes[f] &&
+                      roundTrip.height == sizes[f] && info.xHotspot == decoded.xHotspot &&
+                      info.yHotspot == decoded.yHotspot, "packing preserves all pixels, size and hotspot");
+            for (size_t i = 0; i < pixels.size(); ++i) {
+                Check((pixels[i] >> 24) == (nativePixels[f][i] >> 24),
+                      "every slider position preserves every alpha pixel");
+            }
+            DeleteObject(info.hbmColor);
+            DeleteObject(info.hbmMask);
+            DestroyCursor(tinted);
+        }
+    }
+    // 截断目录/越界偏移/ANI/无文件：安全跳过，不能带着旧缓存继续染。
+    for (const int kind : { 0, 1, 2, 3 }) {
+        auto bad = fixture;
+        if (kind == 0) { bad.resize(5); }
+        if (kind == 1) { bad.resize(7); }
+        if (kind == 2) { const DWORD offset = MAXDWORD; CopyMemory(bad.data() + 18, &offset, 4); }
+        if (kind == 3) { CopyMemory(bad.data(), "RIFF", 4); }
+        {
+            std::ofstream file(tempFile, std::ios::binary | std::ios::trunc);
+            file.write(reinterpret_cast<const char*>(bad.data()), bad.size());
+        }
+        CursorSource badSource;
+        Check(!DecodeCursor(tempFile, 72, badSource) && !badSource.ready,
+              "invalid cursor files are rejected without a stale source");
+    }
+    {
+        std::ofstream file(tempFile, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(fixture.data()), fixture.size());
+    }
+    CursorSource missing;
+    Check(!DecodeCursor(L"", 72, missing), "an empty scheme path is not read from the tinted slot");
+
+    setCursorCalls = 0;
     InitializeCursorTint();
     Check(winEventHooks == 1, "a foreground hook is registered at startup");
     Check(setCursorCalls == std::size(kCursorIds), "every cursor slot is tinted at startup");
 
+    Check(lastCursorWidth == 72 && lastCursorHeight == 72,
+          "48px accessibility size at 150% DPI installs a native 72px cursor");
+
     for (size_t i = 0; i < std::size(kCursorIds); ++i) {
-        g_sources[i] = CursorSource{};
-        g_sources[i].width = 4;
-        g_sources[i].height = 4;
-        g_sources[i].xHotspot = 1;
-        g_sources[i].yHotspot = 1;
         g_sources[i].darkInk = false;
-        g_sources[i].ready = true;
-        g_sources[i].pixels.assign(16, 0xFFFFFFFF);  // 白体，上色后应该正好是目标色
+        g_sources[i].pixels.assign(static_cast<size_t>(g_sources[i].width) * g_sources[i].height,
+                                    0xFFFFFFFF);  // 白体，上色后应该正好是目标色
     }
 
     setCursorCalls = 0;
@@ -444,10 +626,13 @@ static void TestCursor() {
     Check(setCursorCalls == std::size(kCursorIds) && LooksTinted(lastCursorPixels, kEnglishColor),
           "switching back repaints in the English colour");
 
-    const unsigned reloadsBefore = cursorReloads;
+    setCursorCalls = 0;
     SetCursorTintPercent(0);
-    Check(cursorReloads == reloadsBefore + 1, "sliding to 0% reloads the user's cursors");
+    Check(setCursorCalls == std::size(kCursorIds),
+          "sliding to 0% puts the untouched cursors back");
     Check(g_applied == Tint::None, "nothing stays applied at 0%");
+    SetCursorTintPercent(0);
+    Check(setCursorCalls == std::size(kCursorIds), "repeated zero does not replace system cursors again");
     setCursorCalls = 0;
     ApplyTint(true);
     Check(setCursorCalls == 0, "at 0% the system cursors are never touched");
@@ -455,11 +640,38 @@ static void TestCursor() {
     SetCursorTintPercent(60);
     Check(setCursorCalls == std::size(kCursorIds), "leaving 0% tints right away");
 
+    Check(lastCursorWidth == 72, "re-enabling also uses the native physical size");
+    const auto originalPixels = g_sources[0].pixels;
+    for (const int dpi : { 96, 192, 288, 144 }) {
+        cursorDpi = dpi;
+        setCursorCalls = 0;
+        ApplyTint(false);
+        Check(setCursorCalls == std::size(kCursorIds) && lastCursorWidth == MulDiv(48, dpi, 96),
+              "moving between monitor DPIs rebuilds the cursor even without an IME change");
+    }
+    Check(g_sources[0].pixels == originalPixels, "DPI rebuilds never tint an already tinted source");
+    OnSystemCursorsChanged();
+    Check(g_sources[0].pixels == originalPixels, "scheme notification reloads untouched file pixels");
+
+    highContrast = true;
+    setCursorCalls = 0;
+    ApplyTint(true);
+    Check(setCursorCalls == std::size(kCursorIds) && g_applied == Tint::None &&
+              lastCursorPixels == nativePixels[1] && lastCursorWidth == 72 &&
+              lastCursorX == 10 && lastCursorY == 14, "high contrast restores exact original cursor");
+    ApplyTint(false);
+    Check(setCursorCalls == std::size(kCursorIds), "high contrast does not keep replacing cursors");
+    highContrast = false;
+    ApplyTint(true);
+
     DestroyCursorTint();
+    setCursorCalls = 0;
     DestroyCursorTint();
+    Check(setCursorCalls == 0, "repeated shutdown does not touch system cursors");
+    Check(DeleteFileW(tempFile) != FALSE, "remove cursor fixture");
     Check(winEventUnhooks == 1, "shutting down twice releases the hook exactly once");
     Check(g_applied == Tint::None, "shutdown does not leave a tint behind");
-    std::puts("PASS: cursor tint colour rule, hotspot round trip, state machine, shutdown");
+    std::puts("PASS: native cursor frames, pixel-exact alpha/packing, DPI, malformed files, tint lifecycle");
 }
 
 static void TestStartupTaskXml() {
@@ -482,6 +694,7 @@ static void TestStartupTaskXml() {
 }
 
 int main() {
+    _RTC_SetErrorFunc(OnRuntimeCheckFailure);
     TestKeyboard();
     TestHookThread();
     TestRendering();

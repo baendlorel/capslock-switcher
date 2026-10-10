@@ -3,8 +3,12 @@
 #include "app.h"
 #include "banner.h"
 #include "logging.h"
+#include "surface.h"
 #include "tray.h"
 
+#include <algorithm>
+#include <climits>
+#include <fstream>
 #include <vector>
 
 namespace {
@@ -30,7 +34,8 @@ struct CursorSource {
 	DWORD yHotspot = 0;
 	bool darkInk = false;  // 本体是黑的还是白的：决定染色朝哪一边靠
 	bool ready = false;
-	std::vector<DWORD> pixels;  // straight alpha，自顶向下，0xAARRGGBB
+	std::vector<BYTE> original;  // 单帧 .cur 原始字节：还原保留调色板、掩码和热点
+	std::vector<DWORD> pixels;  // premultiplied alpha，自顶向下，0xAARRGGBB
 };
 
 enum class Tint {
@@ -45,7 +50,7 @@ Tint g_target = Tint::None;   // 想要的颜色，重刷时直接用，不用�
 HWINEVENTHOOK g_foregroundHook = nullptr;
 ULONGLONG g_lastProbeTick = 0;
 unsigned g_pollTicks = 0;
-bool g_resetting = false;  // 我们自己发起的重载：别当成"用户改了方案"再处理一遍
+int g_sourceDpi = 0;
 
 // 0% 就是"不变"：这时和以前关掉那个开关是一回事，系统光标保持用户自己的样子。
 bool TintOn() {
@@ -78,23 +83,24 @@ bool DetectDarkInk(const std::vector<DWORD>& pixels) {
 //   暗体：out = lerp(白, 目标色, (255-L)/255) —— 黑体变目标色，白边还是白
 // percent 是上色程度：100 就是上面那个满色，0 原样不动，中间按比例在"原来的像素"
 // 和满色之间插值——所以滑块越小，红/蓝越淡。
-// 只动 RGB 不动 A，保持 straight alpha。
+// 只动 RGB 不动 A。GDI 光标是预乘 alpha：暗体的白描边也必须以 A 为上限。
 void TintPixels(DWORD* pixels, const size_t count, const COLORREF color, const bool darkInk,
                 const int percent) {
 	const int tint[3] = { GetRValue(color), GetGValue(color), GetBValue(color) };
-	const int keep = darkInk ? 255 : 0;
 	for (size_t i = 0; i < count; ++i) {
 		const DWORD px = pixels[i];
 		if ((px >> 24) == 0) {
 			continue;
 		}
-		const int weight = darkInk ? 255 - Luma(px) : Luma(px);
+		const int alpha = static_cast<int>(px >> 24);
+		const int weight = darkInk ? alpha - Luma(px) : Luma(px);
 		const int channel[3] = { static_cast<int>((px >> 16) & 0xFF),
 			                     static_cast<int>((px >> 8) & 0xFF),
 			                     static_cast<int>(px & 0xFF) };
 		DWORD out = px & 0xFF000000;
 		for (int c = 0; c < 3; ++c) {
-			const int full = keep + (tint[c] - keep) * weight / 255;
+			const int full = darkInk ? alpha - (255 - tint[c]) * weight / 255
+			                         : tint[c] * weight / 255;
 			out |= static_cast<DWORD>(channel[c] + (full - channel[c]) * percent / 100)
 			       << (16 - c * 8);
 		}
@@ -102,72 +108,92 @@ void TintPixels(DWORD* pixels, const size_t count, const COLORREF color, const b
 	}
 }
 
-// 32bpp 自顶向下 DIB。注意不要多建一个内存 DC 把位图选进去：
-// CreateIconIndirect 要求这两份位图没有被任何 DC 选着。
-HBITMAP MakeColorDib(const std::vector<DWORD>& pixels, const int width, const int height) {
-	BITMAPINFO info = {};
-	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-	info.bmiHeader.biWidth = width;
-	info.bmiHeader.biHeight = -height;
-	info.bmiHeader.biPlanes = 1;
-	info.bmiHeader.biBitCount = 32;
-	info.bmiHeader.biCompression = BI_RGB;
-	void* bits = nullptr;
-	const HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-	if (bitmap != nullptr && bits != nullptr) {
-		CopyMemory(bits, pixels.data(), pixels.size() * sizeof(DWORD));
-	}
-	return bitmap;
-}
+// 1bpp 位图的调色板要两项（0 = 黑，1 = 白），而 BITMAPINFO 只声明了 bmiColors[1] 一项，
+// 直接写 bmiColors[1] 就写到栈上去了——Debug 的 /RTC 会当场报"变量 info 周围的栈被破坏"。
+// 自己排一个够大的结构，再当 BITMAPINFO 用。
+struct MonoBitmapInfo {
+	BITMAPINFOHEADER header;
+	RGBQUAD colors[2];
+};
 
-// 掩码按 alpha 反推：全透明的像素是 1。全 0 的掩码在只看 alpha 的路径上没问题，
-// 但在忽略 alpha 的路径（远程桌面之类）会画出一整块色块。
-HBITMAP MakeMaskDib(const std::vector<DWORD>& pixels, const int width, const int height) {
-	const int stride = (width + 31) / 32 * 4;
-	std::vector<BYTE> bits(static_cast<size_t>(stride) * height, 0);
-	for (int y = 0; y < height; ++y) {
-		for (int x = 0; x < width; ++x) {
-			if ((pixels[static_cast<size_t>(y) * width + x] >> 24) == 0) {
-				bits[y * stride + x / 8] |= static_cast<BYTE>(0x80 >> (x % 8));
+// .cur 的目录项是 16 字节；热点位于图像外，传给资源解码器时要补在图像前面。
+struct CursorFileEntry {
+	BYTE width, height, colors, reserved;
+	WORD xHotspot, yHotspot;
+	DWORD bytes, offset;
+};
+static_assert(sizeof(CursorFileEntry) == 16);
+
+// 静态 HCURSOR 经 SetSystemCursor 会先归一化到 96 DPI，再放大回当前 DPI；即使输入
+// 已是原生 72px，150% 下也会走 72 -> 48 -> 72。两帧完全相同的 ANI 走保留像素的路径，
+// 看起来仍是静止光标；不能缩成一帧，否则 Windows 会再次当作静态光标重采样。
+// pixels == nullptr 时包入原 .cur 字节，还原不会丢失单色光标的 AND/XOR 语义。
+HCURSOR PackCursor(const CursorSource& source, const std::vector<DWORD>* pixels) {
+	std::vector<BYTE> image;
+	if (pixels == nullptr) {
+		image = source.original;
+	} else {
+		if (source.width <= 0 || source.height <= 0 ||
+		    pixels->size() != static_cast<size_t>(source.width) * source.height) {
+			return nullptr;
+		}
+		const int stride = (source.width + 31) / 32 * 4;
+		BITMAPINFOHEADER dib = {};
+		dib.biSize = sizeof(dib);
+		dib.biWidth = source.width;
+		dib.biHeight = source.height * 2;
+		dib.biPlanes = 1;
+		dib.biBitCount = 32;
+		const WORD directory[] = { 0, 2, 1 };
+		CursorFileEntry entry = {};
+		entry.width = static_cast<BYTE>(source.width >= 256 ? 0 : source.width);
+		entry.height = static_cast<BYTE>(source.height >= 256 ? 0 : source.height);
+		entry.xHotspot = static_cast<WORD>(source.xHotspot);
+		entry.yHotspot = static_cast<WORD>(source.yHotspot);
+		entry.offset = sizeof(directory) + sizeof(entry);
+		entry.bytes = static_cast<DWORD>(sizeof(dib) + pixels->size() * sizeof(DWORD) +
+		                                  static_cast<size_t>(stride) * source.height);
+		image.resize(entry.offset + entry.bytes, 0);
+		CopyMemory(image.data(), directory, sizeof(directory));
+		CopyMemory(image.data() + sizeof(directory), &entry, sizeof(entry));
+		CopyMemory(image.data() + entry.offset, &dib, sizeof(dib));
+		BYTE* color = image.data() + entry.offset + sizeof(dib);
+		BYTE* mask = color + pixels->size() * sizeof(DWORD);
+		for (int y = 0; y < source.height; ++y) {
+			const int row = source.height - 1 - y;  // .cur DIB 自底向上
+			CopyMemory(color + static_cast<size_t>(row) * source.width * sizeof(DWORD),
+			           pixels->data() + static_cast<size_t>(y) * source.width,
+			           source.width * sizeof(DWORD));
+			for (int x = 0; x < source.width; ++x) {
+				if (((*pixels)[static_cast<size_t>(y) * source.width + x] >> 24) == 0) {
+					mask[row * stride + x / 8] |= static_cast<BYTE>(0x80 >> (x % 8));
+				}
 			}
 		}
 	}
-	BITMAPINFO info = {};
-	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-	info.bmiHeader.biWidth = width;
-	info.bmiHeader.biHeight = -height;
-	info.bmiHeader.biPlanes = 1;
-	info.bmiHeader.biBitCount = 1;
-	info.bmiHeader.biCompression = BI_RGB;
-	info.bmiColors[1].rgbRed = info.bmiColors[1].rgbGreen = info.bmiColors[1].rgbBlue = 255;
-	void* target = nullptr;
-	const HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &target, nullptr, 0);
-	if (bitmap != nullptr && target != nullptr) {
-		CopyMemory(target, bits.data(), bits.size());
-	}
-	return bitmap;
-}
-
-// 拿一份像素造光标。CreateIconIndirect 会自己拷走两份位图，所以这里用完就地删。
-// 返回的句柄归我们所有：SetSystemCursor 收下之后才由系统负责销毁。
-HCURSOR PackCursor(const CursorSource& source, const std::vector<DWORD>& pixels) {
-	const HBITMAP color = MakeColorDib(pixels, source.width, source.height);
-	const HBITMAP mask = MakeMaskDib(pixels, source.width, source.height);
-	if (color == nullptr || mask == nullptr) {
-		DeleteObject(color);
-		DeleteObject(mask);
+	if (image.empty()) {
 		return nullptr;
 	}
-	ICONINFO icon = {};
-	icon.fIcon = FALSE;
-	icon.xHotspot = source.xHotspot;  // 热点必须原样带上：I 型歪了点击落点就不准
-	icon.yHotspot = source.yHotspot;
-	icon.hbmMask = mask;
-	icon.hbmColor = color;
-	const HCURSOR cursor = static_cast<HCURSOR>(CreateIconIndirect(&icon));
-	DeleteObject(color);
-	DeleteObject(mask);
-	return cursor;
+	const DWORD frameBytes = (static_cast<DWORD>(image.size()) + 1) & ~1u;  // RIFF 两字节对齐
+	const DWORD header[] = {
+		0x46464952, 0, 0x4E4F4341,  // RIFF / 总长度稍后填 / ACON
+		0x68696E61, 36,             // anih
+		36, 2, 2, 0, 0, 32, 1, 600, 1,  // 两个相同帧，每帧 10 秒，AF_ICON
+		0x5453494C, 4 + 2 * (8 + frameBytes), 0x6D617266,  // LIST / fram
+	};
+	std::vector<BYTE> animation(sizeof(header) + 2 * (8 + frameBytes), 0);
+	CopyMemory(animation.data(), header, sizeof(header));
+	const DWORD riffBytes = static_cast<DWORD>(animation.size() - 8);
+	CopyMemory(animation.data() + 4, &riffBytes, sizeof(riffBytes));
+	for (int frame = 0; frame < 2; ++frame) {
+		BYTE* chunk = animation.data() + sizeof(header) + frame * (8 + frameBytes);
+		const DWORD icon[] = { 0x6E6F6369, static_cast<DWORD>(image.size()) };  // icon
+		CopyMemory(chunk, icon, sizeof(icon));
+		CopyMemory(chunk + sizeof(icon), image.data(), image.size());
+	}
+	return static_cast<HCURSOR>(CreateIconFromResourceEx(
+	    animation.data(), static_cast<DWORD>(animation.size()), FALSE, 0x00030000,
+	    source.width, source.height, 0));
 }
 
 // hbmColor 里的 32bpp 像素（带 alpha 的光标走这条）。
@@ -191,58 +217,44 @@ bool ReadColorPixels(const HBITMAP bitmap, CursorSource& out) {
 	const int lines =
 	    GetDIBits(screen, bitmap, 0, out.height, out.pixels.data(), &info, DIB_RGB_COLORS);
 	ReleaseDC(nullptr, screen);
-	if (lines == 0) {
-		return false;
-	}
-	for (const DWORD px : out.pixels) {
-		if ((px >> 24) != 0) {
-			return true;  // 有 alpha 就用 alpha
-		}
-	}
-	// alpha 一个都没填的光标：实测 200% DPI 下的经典 I 型就是这样——形状画在 RGB 里、
-	// alpha 全是 0，系统渲染时根本不看 alpha。这里把"RGB 非 0"当成不透明。
-	int promoted = 0;
-	for (DWORD& px : out.pixels) {
-		if ((px & 0xFFFFFF) != 0) {
-			px |= 0xFF000000;
-			++promoted;
-		}
-	}
-	return promoted > 0;
+	return lines == out.height;
 }
 
-// 只有掩码的光标（hbmColor 是空的）。两种摆法都要认：
-//   高度 = 光标高度的两倍（上半 AND 掩码、下半 XOR 掩码，经典的单色反色光标）
-//   高度 = 光标高度（只有一张 AND 掩码：0 = 画成黑色，1 = 屏幕照旧）
-bool ReadMonoPixels(const HBITMAP maskBitmap, CursorSource& out) {
+// 单色光标的掩码始终是上下两半（AND/XOR），与系统默认光标尺寸无关。
+// 彩色但无 alpha 的光标只有 AND 掩码；不能用 RGB 非零判断透明度，否则黑边会丢失。
+bool ReadMonoPixels(const HBITMAP maskBitmap, CursorSource& out, const bool monochrome) {
 	BITMAP bm = {};
 	if (maskBitmap == nullptr || GetObjectW(maskBitmap, sizeof(bm), &bm) == 0 ||
 	    bm.bmBitsPixel != 1 || bm.bmHeight < 2) {
 		return false;
 	}
-	const bool doubled = bm.bmHeight == GetSystemMetrics(SM_CYCURSOR) * 2;
+	const bool doubled = monochrome;
 	out.width = bm.bmWidth;
 	out.height = doubled ? bm.bmHeight / 2 : bm.bmHeight;
 	const int stride = (out.width + 31) / 32 * 4;
 	std::vector<BYTE> bits(static_cast<size_t>(stride) * bm.bmHeight, 0);
 
-	BITMAPINFO info = {};
-	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-	info.bmiHeader.biWidth = out.width;
-	info.bmiHeader.biHeight = -bm.bmHeight;
-	info.bmiHeader.biPlanes = 1;
-	info.bmiHeader.biBitCount = 1;
-	info.bmiHeader.biCompression = BI_RGB;
-	info.bmiColors[1].rgbRed = info.bmiColors[1].rgbGreen = info.bmiColors[1].rgbBlue = 255;
+	MonoBitmapInfo info = {};
+	info.header.biSize = sizeof(BITMAPINFOHEADER);
+	info.header.biWidth = out.width;
+	info.header.biHeight = -bm.bmHeight;
+	info.header.biPlanes = 1;
+	info.header.biBitCount = 1;
+	info.header.biCompression = BI_RGB;
+	info.colors[1].rgbRed = info.colors[1].rgbGreen = info.colors[1].rgbBlue = 255;
 	const HDC screen = GetDC(nullptr);
-	const int lines =
-	    GetDIBits(screen, maskBitmap, 0, bm.bmHeight, bits.data(), &info, DIB_RGB_COLORS);
+	const int lines = GetDIBits(screen, maskBitmap, 0, bm.bmHeight, bits.data(),
+	                            reinterpret_cast<BITMAPINFO*>(&info), DIB_RGB_COLORS);
 	ReleaseDC(nullptr, screen);
 	if (lines == 0) {
 		return false;
 	}
 
-	out.pixels.assign(static_cast<size_t>(out.width) * out.height, 0);
+	if (monochrome) {
+		out.pixels.assign(static_cast<size_t>(out.width) * out.height, 0);
+	} else if (out.pixels.size() != static_cast<size_t>(out.width) * out.height) {
+		return false;
+	}
 	int opaque = 0;
 	for (int y = 0; y < out.height; ++y) {
 		for (int x = 0; x < out.width; ++x) {
@@ -251,35 +263,86 @@ bool ReadMonoPixels(const HBITMAP maskBitmap, CursorSource& out) {
 			const bool xorBit = doubled
 			                        ? (bits[(y + out.height) * stride + x / 8] >> shift & 1) != 0
 			                        : false;
+			DWORD& px = out.pixels[static_cast<size_t>(y) * out.width + x];
 			if (andBit && !xorBit) {
+				px = 0;
 				continue;  // 屏幕照旧 = 透明
 			}
-			// 单张掩码的摆法没有颜色信息，掩码为 0 的地方就是黑色。
-			out.pixels[static_cast<size_t>(y) * out.width + x] =
-			    !doubled ? 0xFF000000 : (xorBit ? 0xFFFFFFFF : 0xFF000000);
+			px = monochrome ? (xorBit ? 0xFFFFFFFF : 0xFF000000) : px | 0xFF000000;
 			++opaque;
 		}
 	}
 	return opaque > 0;
 }
 
-// 读一个系统光标槽现在的样子。注意 LoadCursor 拿到的就是槽里那个共享句柄，
-// 只能读、不能毁，也不能直接喂给 SetSystemCursor。
-bool DecodeCursor(const DWORD id, CursorSource& out) {
-	const HCURSOR cursor = static_cast<HCURSOR>(LoadCursorW(nullptr, MAKEINTRESOURCEW(id)));
-	ICONINFO info = {};
-	if (cursor == nullptr || !GetIconInfo(cursor, &info)) {
+// 不读 LoadCursor 的共享槽，也不让 LoadImage 挑帧：实测 EOA 多尺寸 .cur 请求 72px 时
+// 后者仍会重采样别的帧。明确选择原生尺寸，交给资源解码器；没有匹配帧才缩小较大的帧。
+// .ani 和没有可读文件的槽保持原样，不把动画拍扁，也不猜测/反染系统槽中的像素。
+bool DecodeCursor(const wchar_t* path, const int size, CursorSource& out) {
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	const auto length = file.tellg();
+	if (!file || length < 6 || length > 16 * 1024 * 1024 || size <= 0) {
 		return false;
 	}
-	const bool fromColor = ReadColorPixels(info.hbmColor, out);
-	const bool ok = fromColor || ReadMonoPixels(info.hbmMask, out);
+	std::vector<BYTE> bytes(static_cast<size_t>(length));
+	file.seekg(0);
+	if (!file.read(reinterpret_cast<char*>(bytes.data()), length)) {
+		return false;
+	}
+	WORD header[3] = {};
+	CopyMemory(header, bytes.data(), sizeof(header));
+	const size_t directoryEnd = 6 + static_cast<size_t>(header[2]) * sizeof(CursorFileEntry);
+	if (header[0] != 0 || header[1] != 2 || header[2] == 0 || directoryEnd > bytes.size()) {
+		return false;
+	}
+	CursorFileEntry best = {};
+	int bestScore = INT_MAX;
+	for (size_t i = 0; i < header[2]; ++i) {
+		CursorFileEntry entry = {};
+		CopyMemory(&entry, bytes.data() + 6 + i * sizeof(entry), sizeof(entry));
+		const int width = entry.width == 0 ? 256 : entry.width;
+		const int height = entry.height == 0 ? 256 : entry.height;
+		if (entry.offset < directoryEnd || entry.offset > bytes.size() || entry.bytes == 0 ||
+		    entry.bytes > bytes.size() - entry.offset ||
+		    entry.xHotspot >= width || entry.yHotspot >= height) {
+			return false;
+		}
+		const int score = width >= size && height >= size ? (std::max)(width, height) - size
+			                                               : 65536 - (std::min)(width, height);
+		if (score < bestScore) {
+			best = entry;
+			bestScore = score;
+		}
+	}
+	out.width = out.height = size;
+	const WORD directory[] = { 0, 2, 1 };
+	out.original.resize(sizeof(directory) + sizeof(best) + best.bytes);
+	CopyMemory(out.original.data(), directory, sizeof(directory));
+	CopyMemory(out.original.data() + sizeof(directory) + sizeof(best),
+	           bytes.data() + best.offset, best.bytes);
+	best.offset = sizeof(directory) + sizeof(best);
+	CopyMemory(out.original.data() + sizeof(directory), &best, sizeof(best));
+	const HCURSOR cursor = PackCursor(out, nullptr);
+	ICONINFO info = {};
+	if (cursor == nullptr || !GetIconInfo(cursor, &info)) {
+		DestroyCursor(cursor);
+		return false;
+	}
+	bool ok = info.hbmColor == nullptr ? ReadMonoPixels(info.hbmMask, out, true)
+	                                  : ReadColorPixels(info.hbmColor, out);
+	if (ok && info.hbmColor != nullptr &&
+	    std::none_of(out.pixels.begin(), out.pixels.end(), [](DWORD px) { return (px >> 24) != 0; })) {
+		ok = ReadMonoPixels(info.hbmMask, out, false);
+	}
 	DeleteObject(info.hbmColor);
 	DeleteObject(info.hbmMask);
+	DestroyCursor(cursor);
 	if (!ok) {
 		return false;
 	}
-	Log(L"cursor: 光标槽 %lu 读到 %dx%d（%s），热点 (%lu,%lu)", id, out.width, out.height,
-	    fromColor ? L"32bpp" : L"单色", info.xHotspot, info.yHotspot);
+	Log(L"cursor: 原生帧 %ux%u -> %dx%d，热点 (%lu,%lu)，%s",
+	    best.width == 0 ? 256 : best.width, best.height == 0 ? 256 : best.height,
+	    out.width, out.height, info.xHotspot, info.yHotspot, path);
 	out.xHotspot = info.xHotspot;
 	out.yHotspot = info.yHotspot;
 	out.darkInk = DetectDarkInk(out.pixels);
@@ -296,36 +359,66 @@ bool HighContrastOn() {
 	return (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
 }
 
-// 把系统光标还原成用户自己的方案。这里**绝不能**带 SPIF_UPDATEINIFILE：
-// 那会把我们染过色的光标写进用户配置，注销之后还留着。
-void ResetSystemCursors() {
-	if (g_resetting) {
-		return;
+// 原始 .cur 字节也走双帧提交，避免还原时再次被 SetSystemCursor 缩小再放大。
+void RestoreSourceCursors() {
+	for (size_t i = 0; i < std::size(kCursorIds); ++i) {
+		if (!g_sources[i].ready) {
+			continue;
+		}
+		const HCURSOR cursor = PackCursor(g_sources[i], nullptr);
+		if (cursor != nullptr && SetSystemCursor(cursor, kCursorIds[i]) == FALSE) {
+			DestroyCursor(cursor);
+		}
 	}
-	g_resetting = true;
-	SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0);
-	g_resetting = false;
 	g_applied = Tint::None;
 }
 
-// 重新解码前必须先还原：LoadCursor 读到的就是槽里的东西，带着我们的颜色解码
-// 会越染越深。
-void RebuildSources() {
-	// 顺带把上一次强杀留下的颜色冲掉：解码必须在没染色的状态下做，
-	// 否则读回来的是我们自己染过的光标，会越染越深。
-	Log(L"cursor: 重载用户的光标方案，再重新读一遍三个槽");
-	ResetSystemCursors();
+// 物理尺寸 = 用户的基础指针大小 × 鼠标所在显示器的 DPI，绝不是 SM_CXCURSOR。
+// 每次从磁盘读原图，强杀残留、部分着色和跨屏重建都不会在旧颜色上继续加工。
+void RebuildSources(const int dpi) {
+	constexpr const wchar_t* names[] = { L"Arrow", L"IBeam", L"Hand" };
+	DWORD baseSize = 32;
+	DWORD bytes = sizeof(baseSize);
+	RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", L"CursorBaseSize",
+	             RRF_RT_REG_DWORD, nullptr, &baseSize, &bytes);
+	if (baseSize < 32 || baseSize > 256) {
+		baseSize = 32;
+	}
+	const int size = MulDiv(static_cast<int>(baseSize), dpi, 96);
+	Log(L"cursor: 基础大小 %lu，DPI %d，目标 %dpx", baseSize, dpi, size);
 	for (size_t i = 0; i < std::size(kCursorIds); ++i) {
-		if (!DecodeCursor(kCursorIds[i], g_sources[i])) {
-			// 某个槽读不出来（比如用户配了 .ani 动画光标）就跳过它，别的照染。
-			Log(L"cursor: 系统光标 %lu 读不出来，这个槽保持原样", kCursorIds[i]);
+		g_sources[i] = CursorSource{};
+		wchar_t path[32768] = {};
+		bytes = sizeof(path);
+		if (RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", names[i],
+		                 RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+		                 nullptr, path, &bytes) != ERROR_SUCCESS ||
+		    !DecodeCursor(path, size, g_sources[i])) {
+			Log(L"cursor: 槽 %lu 无可用静态方案文件，保持原样", kCursorIds[i]);
 		}
 	}
+	g_sourceDpi = dpi;
+	g_applied = Tint::None;
 }
 
 void ApplyTint(const bool chinese) {
 	g_target = chinese ? Tint::Chinese : Tint::English;
-	if (!TintOn() || g_applied == g_target || HighContrastOn()) {
+	if (!TintOn()) {
+		return;
+	}
+	if (HighContrastOn()) {
+		if (g_applied != Tint::None) {
+			RestoreSourceCursors();
+		}
+		return;
+	}
+	POINT point = {};
+	GetCursorPos(&point);
+	const int dpi = ScreenDpi(WindowFromPoint(point), nullptr);
+	if (g_sourceDpi != dpi) {
+		RebuildSources(dpi);
+	}
+	if (g_applied == g_target) {
 		return;
 	}
 	const COLORREF color = chinese ? kChineseColor : kEnglishColor;
@@ -337,7 +430,7 @@ void ApplyTint(const bool chinese) {
 		std::vector<DWORD> pixels = g_sources[i].pixels;
 		TintPixels(pixels.data(), pixels.size(), color, g_sources[i].darkInk,
 		           g_cursorTintPercent.load());
-		const HCURSOR cursor = PackCursor(g_sources[i], pixels);
+		const HCURSOR cursor = PackCursor(g_sources[i], &pixels);
 		if (cursor == nullptr) {
 			continue;
 		}
@@ -351,16 +444,6 @@ void ApplyTint(const bool chinese) {
 	if (applied) {
 		g_applied = g_target;
 	}
-}
-
-// Windows 偶尔会自己把光标方案重载一遍（登录时、会话中途也见过），颜色会被冲掉。
-// 直接无条件重刷，不去检测——重新造三个光标比检测便宜。
-void ReapplyTint() {
-	if (!TintOn() || g_target == Tint::None) {
-		return;
-	}
-	g_applied = Tint::None;
-	ApplyTint(g_target == Tint::Chinese);
 }
 
 // 前台窗口换了。这里只起个去抖定时器：刚切过去的窗口可能还没挂上 IME 上下文，
@@ -381,8 +464,6 @@ void InitializeCursorTint() {
 	if (!TintOn()) {
 		return;
 	}
-	// 先自愈再解码：上一次要是被强杀，槽里留着的就是我们的颜色。
-	RebuildSources();
 	if (g_mainWnd != nullptr) {
 		SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
 	}
@@ -412,7 +493,7 @@ void CursorPollTick() {
 		return;
 	}
 	if (++g_pollTicks % kReapplyTicks == 0) {
-		ReapplyTint();
+		g_applied = Tint::None;  // Windows 可能自行重载方案，定期补上颜色
 	}
 	if (GetTickCount64() - g_lastProbeTick < kPollMs) {
 		return;  // 刚刚探测过（CapsLock 或切窗口那条路），不重复问
@@ -425,7 +506,7 @@ void OnSystemCursorsChanged() {
 	if (!TintOn()) {
 		return;
 	}
-	RebuildSources();  // 用户换了方案/大小，旧像素作废；顺带把我们的颜色冲掉
+	g_sourceDpi = 0;  // 用户换方案/大小后直接读新文件，不拿旧像素覆盖新方案
 	g_applied = Tint::None;
 	ApplyTint(g_target == Tint::Chinese);
 }
@@ -439,16 +520,16 @@ void DestroyCursorTint() {
 		KillTimer(g_mainWnd, kTimerCursorSettle);
 		KillTimer(g_mainWnd, kTimerCursorPoll);
 	}
-	// 只有真染过才去动系统光标：没染过还去 SPI_SETCURSORS 会平白把用户的方案重载一遍。
+	// 只有真染过才去动系统光标：没染过就别白写一遍。
 	if (g_applied != Tint::None) {
-		ResetSystemCursors();
+		RestoreSourceCursors();
 	}
 	for (CursorSource& source : g_sources) {
-		source.ready = false;
-		source.pixels.clear();
+		source = CursorSource{};
 	}
 	g_target = Tint::None;
 	g_pollTicks = 0;
+	g_sourceDpi = 0;
 }
 
 void SetCursorTintPercent(const int percent) {
@@ -462,15 +543,15 @@ void SetCursorTintPercent(const int percent) {
 			KillTimer(g_mainWnd, kTimerCursorSettle);
 			KillTimer(g_mainWnd, kTimerCursorPoll);
 		}
-		ResetSystemCursors();
+		if (wasOn) {
+			RestoreSourceCursors();
+		}
 		ShowBalloon(L"鼠标指针不再跟着中英文变色");
 		return;
 	}
 
 	if (!wasOn) {
-		// 刚从"不变"里走出来：先自愈再解码。上一次要是被强杀，槽里留着的就是我们染过的
-		// 光标，直接拿它当原图会越染越深。
-		RebuildSources();
+		g_sourceDpi = 0;  // 关闭期间可能换过方案，下次上色重新读文件
 		if (g_mainWnd != nullptr) {
 			SetTimer(g_mainWnd, kTimerCursorPoll, kPollMs, nullptr);
 		}
