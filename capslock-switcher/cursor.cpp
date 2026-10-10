@@ -3,7 +3,6 @@
 #include "app.h"
 #include "banner.h"
 #include "logging.h"
-#include "settings.h"
 #include "surface.h"
 
 #include <algorithm>
@@ -577,20 +576,14 @@ void SyncCursorTint(const bool wasOn) {
 	ApplyTint(CurrentInputIsChinese());
 }
 
-void SetCursorTintPercent(const int percent) {
+// 设置界面在别的进程里，它改完 ini 会通知主窗口，主窗口再调这里。
+void ApplyCursorTintSettings(const bool enabled, const int percent) {
 	const int wanted = percent < 0 ? 0 : percent > 100 ? 100 : percent;
-	if (wanted == g_cursorTintPercent.load()) {
-		return;  // 拖动时同一档会被反复上报：值没变就别重刷、也别再写一次 ini
+	if (enabled == g_cursorTintEnabled.load() && wanted == g_cursorTintPercent.load()) {
+		return;  // 没有变化就别白刷一遍
 	}
 	const bool wasOn = TintOn();
+	g_cursorTintEnabled = enabled;
 	g_cursorTintPercent = wanted;
 	SyncCursorTint(wasOn);
-	SaveSettings();
-}
-
-void SetCursorTintEnabled(const bool enabled) {
-	const bool wasOn = TintOn();
-	g_cursorTintEnabled = enabled;
-	SyncCursorTint(wasOn);
-	SaveSettings();
 }

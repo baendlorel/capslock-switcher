@@ -151,9 +151,13 @@ CursorTintPercent=100
 - 钩子运行在独立线程，回调只在每次 CapsLock 首次按下时投递 `PostMessage`，
   由主线程执行 `SendInput`；长按不会反复切换，耗时操作也不会阻塞钩子线程。
   如果前台窗口已改变，则丢弃排队的切换请求
-- 进程显式声明 **Per-Monitor V2 DPI 感知**（`SetProcessDpiAwarenessContext`，
-  并带 Win8.1 / Vista 两级回退）。不声明的话 Windows 会把窗口渲染进一张更小的
-  虚拟画布再拉伸到屏幕，启动图就会像"被强行放大"一样发虚
+- 主程序在初始化时声明 **Per-Monitor V2 DPI 感知**（`SetProcessDpiAwarenessContext`）。
+  独立的 WinUI3 设置程序通过 `capslock-switcher-settings/app.manifest` 在进程启动前声明
+  **PerMonitorV2**，Debug/Release 都将它嵌入 exe。DPI 设置不会跨进程继承；没有声明时，
+  设置窗口会按 96 DPI 渲染，再被系统放大，文字和控件都会发虚。WinUI 控件继续使用 DIP，
+  由框架按显示器 DPI 渲染，不手动给字号和控件再乘一次缩放。
+  构建后可运行 `./tests/settings-dpi.ps1 -Configuration Release` 检查 exe 内嵌清单；若设置
+  窗口已打开，还会检查窗口真实的 DPI 感知状态。
 - `Alt+CapsLock`：以 CapsLock 首次按下时的 Alt 状态决定是否放行，并保持到该键抬起；
   中途松开 Alt 或改变映射开关，都不会拆散按下/抬起事件
 - 启动画面 `umbral-keys.png` 以 RCDATA 资源嵌进 exe（见 `capslock-switcher.rc`），

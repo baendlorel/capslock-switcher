@@ -108,7 +108,7 @@ static int FakeCursorDpi(HWND, HWND) { return cursorDpi; }
 #undef ScreenDpi
 #include "../capslock-switcher/keyboard.cpp"
 #include "../capslock-switcher/logging.cpp"
-#include "../capslock-switcher/settings.cpp"
+#include "../capslock-switcher/config.cpp"
 #include "../capslock-switcher/splash.cpp"
 #include "../capslock-switcher/startup.cpp"
 #include "../capslock-switcher/surface.cpp"
@@ -648,31 +648,30 @@ static void TestCursor() {
           "switching back repaints in the English colour");
 
     setCursorCalls = 0;
-    SetCursorTintPercent(0);
-    Check(setCursorCalls == std::size(kSlots),
-          "sliding to 0% puts the untouched cursors back");
+    ApplyCursorTintSettings(true, 0);
+    Check(setCursorCalls == std::size(kSlots), "0% puts the untouched cursors back");
     Check(g_applied == Tint::None, "nothing stays applied at 0%");
-    SetCursorTintPercent(0);
-    Check(setCursorCalls == std::size(kSlots), "repeated zero does not replace system cursors again");
+    ApplyCursorTintSettings(true, 0);
+    Check(setCursorCalls == std::size(kSlots), "the same 0% again does not touch the cursors");
     setCursorCalls = 0;
     ApplyTint(true);
     Check(setCursorCalls == 0, "at 0% the system cursors are never touched");
 
-    SetCursorTintPercent(60);
+    ApplyCursorTintSettings(true, 60);
     Check(setCursorCalls == std::size(kSlots), "leaving 0% tints right away");
 
-    // 总开关：关掉立刻还原；关着时滑块再动也不碰系统光标；打开马上重新上色。
+    // 总开关：关掉立刻还原；关着时浓度再变也不碰系统光标；打开马上重新上色。
     setCursorCalls = 0;
-    SetCursorTintEnabled(false);
+    ApplyCursorTintSettings(false, 60);
     Check(setCursorCalls == std::size(kSlots) && g_applied == Tint::None,
           "turning the master switch off puts the originals back");
     setCursorCalls = 0;
-    SetCursorTintPercent(80);
-    Check(setCursorCalls == 0, "the slider does nothing while the master switch is off");
-    SetCursorTintEnabled(false);
-    Check(setCursorCalls == 0, "turning it off twice does not touch the cursors again");
+    ApplyCursorTintSettings(false, 80);
+    Check(setCursorCalls == 0, "the intensity is ignored while the master switch is off");
+    ApplyCursorTintSettings(false, 80);
+    Check(setCursorCalls == 0, "an unchanged off state does not touch the cursors again");
     setCursorCalls = 0;
-    SetCursorTintEnabled(true);
+    ApplyCursorTintSettings(true, 80);
     Check(setCursorCalls == std::size(kSlots), "turning the master switch back on tints right away");
 
     Check(lastCursorWidth == 72, "re-enabling also uses the native physical size");
@@ -730,99 +729,70 @@ static void TestStartupTaskXml() {
 
 static void TestSettingsFile() {
     // 设置存在 exe 旁边的 ini 里：缺失或写坏的项退回默认值，并把文件重写成合法内容。
-    const wchar_t* path = IniPath();
+    const wchar_t* path = SettingsPath();
     Check(path != nullptr && wcslen(path) > 0, "the ini path comes from the exe location");
     DeleteFileW(path);
 
-    g_enabled = false;  // 先掰成非默认，确认确实是加载把它改回来的
-    g_altPassThrough = false;
-    g_cursorTintEnabled = false;
-    g_cursorTintPercent = 7;
-    LoadSettings();
-    Check(g_enabled.load() == kDefaultEnabled && g_altPassThrough.load() == kDefaultAltPassThrough &&
-              g_cursorTintEnabled.load() == kDefaultCursorTintEnabled &&
-              g_cursorTintPercent.load() == kDefaultCursorTintPercent,
+    bool repaired = false;
+    AppSettings settings = ReadSettings(&repaired);
+    Check(repaired && settings.mappingEnabled == kDefaultMappingEnabled &&
+              settings.altCapsLockPassThrough == kDefaultAltCapsLockPassThrough &&
+              settings.cursorTintEnabled == kDefaultCursorTintEnabled &&
+              settings.cursorTintPercent == kDefaultCursorTintPercent,
           "a missing ini falls back to the defaults");
     Check(GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES,
           "a missing ini is written out with the defaults");
 
-    // 合法值原样读回。
+    // 合法值原样读回，而且不需要修复。
     WritePrivateProfileStringW(L"General", L"MappingEnabled", L"0", path);
     WritePrivateProfileStringW(L"General", L"AltCapsLockPassThrough", L"0", path);
     WritePrivateProfileStringW(L"General", L"CursorTintEnabled", L"0", path);
     WritePrivateProfileStringW(L"General", L"CursorTintPercent", L"35", path);
-    LoadSettings();
-    Check(!g_enabled.load() && !g_altPassThrough.load() && !g_cursorTintEnabled.load() &&
-              g_cursorTintPercent.load() == 35,
-          "valid ini values load back");
+    repaired = true;
+    settings = ReadSettings(&repaired);
+    Check(!repaired && !settings.mappingEnabled && !settings.altCapsLockPassThrough &&
+              !settings.cursorTintEnabled && settings.cursorTintPercent == 35,
+          "valid ini values load back untouched");
 
     // 只坏一项时，坏项回默认，别的好值留着。
-    WritePrivateProfileStringW(L"General", L"MappingEnabled", L"0", path);
     WritePrivateProfileStringW(L"General", L"CursorTintPercent", L"abc", path);
-    LoadSettings();
-    Check(!g_enabled.load() && g_cursorTintPercent.load() == kDefaultCursorTintPercent,
+    settings = ReadSettings();
+    Check(!settings.mappingEnabled && settings.cursorTintPercent == kDefaultCursorTintPercent,
           "only the broken item falls back to its default");
     wchar_t text[32] = {};
     GetPrivateProfileStringW(L"General", L"CursorTintPercent", L"", text, 32, path);
     Check(wcscmp(text, L"100") == 0, "the broken ini is rewritten with valid content");
 
-    // 越界、空文件、全是垃圾，都退回默认。
+    // 越界、空值、半截数字，都退回默认。
     for (const wchar_t* bad : { L"101", L"-1", L"", L"50x", L"99999999999999999999" }) {
         WritePrivateProfileStringW(L"General", L"CursorTintPercent", bad, path);
-        LoadSettings();
-        Check(g_cursorTintPercent.load() == kDefaultCursorTintPercent,
-              "an out-of-range or unparsable value falls back to its default");
+        Check(ReadSettings().cursorTintPercent == kDefaultCursorTintPercent,
+              "an out-of-range or unparsable intensity falls back to its default");
     }
     for (const wchar_t* bad : { L"2", L"true", L"" }) {
         WritePrivateProfileStringW(L"General", L"CursorTintEnabled", bad, path);
-        LoadSettings();
-        Check(g_cursorTintEnabled.load() == kDefaultCursorTintEnabled,
+        Check(ReadSettings().cursorTintEnabled == kDefaultCursorTintEnabled,
               "a flag only accepts 0 or 1");
     }
+
+    // 主程序和设置界面共用同一份读写：一边写成什么样，另一边就该读回什么样。
+    AppSettings round = {};
+    round.mappingEnabled = false;
+    round.altCapsLockPassThrough = true;
+    round.cursorTintEnabled = true;
+    round.cursorTintPercent = 42;
+    WriteSettings(round);
+    repaired = true;
+    const AppSettings loaded = ReadSettings(&repaired);
+    Check(!repaired && loaded.mappingEnabled == round.mappingEnabled &&
+              loaded.altCapsLockPassThrough == round.altCapsLockPassThrough &&
+              loaded.cursorTintEnabled == round.cursorTintEnabled &&
+              loaded.cursorTintPercent == round.cursorTintPercent,
+          "what one process writes the other reads back");
+
     DeleteFileW(path);
     Check(GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES, "no ini is left behind");
-
-    g_enabled = kDefaultEnabled;
-    g_altPassThrough = kDefaultAltPassThrough;
-    g_cursorTintEnabled = kDefaultCursorTintEnabled;
-    g_cursorTintPercent = kDefaultCursorTintPercent;
     std::puts("PASS: settings ini, broken values fall back and are rewritten");
-}
-
-static void TestSliderClick() {
-    // 系统默认点轨道只挪一页；子类化之后应该点哪跳哪，点滑块本身则不动。
-    const INITCOMMONCONTROLSEX commonControls = {
-        static_cast<DWORD>(sizeof(commonControls)), ICC_BAR_CLASSES
-    };
-    InitCommonControlsEx(&commonControls);
-    const HWND wnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 300, 120, nullptr,
-                                     nullptr, nullptr, nullptr);
-    const HWND slider = CreateWindowExW(
-        0, L"msctls_trackbar32", L"", WS_CHILD | TBS_HORZ | TBS_AUTOTICKS, 0, 0, 200, 40, wnd,
-        nullptr, nullptr, nullptr);
-    Check(wnd != nullptr && slider != nullptr, "create a real trackbar to click on");
-    SendMessageW(slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-    SendMessageW(slider, TBM_SETPOS, TRUE, 50);
-    SetWindowSubclass(slider, SliderProc, 0, 0);
-
-    RECT channel = {};
-    SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
-    Check(channel.right > channel.left, "the trackbar reports a usable channel");
-
-    const auto click = [&](const int x) {
-        SendMessageW(slider, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, 20));
-        SendMessageW(slider, WM_LBUTTONUP, 0, MAKELPARAM(x, 20));
-        return static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
-    };
-    Check(click(channel.right) >= 95, "clicking the right end jumps to the top");
-    Check(click(channel.left) <= 5, "clicking the left end jumps to the bottom");
-
-    const int middle = (channel.left + channel.right) / 2;
-    const int centered = click(middle);
-    Check(centered >= 45 && centered <= 55, "clicking the middle lands in the middle");
-    Check(click(middle) == centered, "clicking the thumb itself does not move it");
-    DestroyWindow(wnd);
-    std::puts("PASS: the tint slider jumps to where it is clicked");
 }
 
 int main() {
@@ -834,7 +804,6 @@ int main() {
     TestCursor();
     TestStartupTaskXml();
     TestSettingsFile();
-    TestSliderClick();
     std::puts("All regression checks passed.");
     return 0;
 }

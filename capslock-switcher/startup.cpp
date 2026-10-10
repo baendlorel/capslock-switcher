@@ -10,7 +10,6 @@
 
 namespace {
 
-constexpr wchar_t kStartupTaskName[] = L"CapsLock Switcher";
 constexpr DWORD kCommandTimeoutMs = 20000;
 constexpr DWORD kCommandExitWaitMs = 1000;
 

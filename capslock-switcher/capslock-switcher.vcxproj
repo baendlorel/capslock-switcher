@@ -24,6 +24,8 @@
     <ProjectGuid>{0f9e43ce-9133-45e4-acc1-ea0d81fd794f}</ProjectGuid>
     <RootNamespace>capslockswitcher</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <OutDir>$(ProjectDir)..\x64\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)x64\$(Configuration)\</IntDir>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -150,7 +152,7 @@
     <ClInclude Include="cursor.h" />
     <ClInclude Include="keyboard.h" />
     <ClInclude Include="logging.h" />
-    <ClInclude Include="settings.h" />
+    <ClInclude Include="config.h" />
     <ClInclude Include="splash.h" />
     <ClInclude Include="startup.h" />
     <ClInclude Include="surface.h" />
@@ -162,7 +164,7 @@
     <ClCompile Include="cursor.cpp" />
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="logging.cpp" />
-    <ClCompile Include="settings.cpp" />
+    <ClCompile Include="config.cpp" />
     <ClCompile Include="splash.cpp" />
     <ClCompile Include="startup.cpp" />
     <ClCompile Include="surface.cpp" />

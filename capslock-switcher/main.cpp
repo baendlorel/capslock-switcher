@@ -18,7 +18,7 @@
 #include "cursor.h"
 #include "keyboard.h"
 #include "logging.h"
-#include "settings.h"
+#include "config.h"
 #include "splash.h"
 #include "surface.h"
 #include "startup.h"
@@ -49,13 +49,13 @@ HINSTANCE g_hInst = nullptr;
 HWND g_mainWnd = nullptr;
 
 // 托盘菜单和设置页共同控制的"启用映射"开关。
-std::atomic_bool g_enabled{ kDefaultEnabled };
+std::atomic_bool g_enabled{ kDefaultMappingEnabled };
 
 // 缓存"登录任务装没装"的答案，启动时和每次改动之后刷新。
 bool g_startupTaskInstalled = false;
 
 // Alt+CapsLock 放行给原来的大写锁定（默认开）。
-std::atomic_bool g_altPassThrough{ kDefaultAltPassThrough };
+std::atomic_bool g_altPassThrough{ kDefaultAltCapsLockPassThrough };
 
 // 鼠标指针跟着中英文变色（默认开，满格 100%）。
 std::atomic_bool g_cursorTintEnabled{ kDefaultCursorTintEnabled };
@@ -63,7 +63,6 @@ std::atomic_int g_cursorTintPercent{ kDefaultCursorTintPercent };
 
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"CapsLockSwitcherClass";
 constexpr wchar_t kMutexName[] = L"CapsLockSwitcherMutex";
 
 // 注册成系统级消息，好让第二次启动能和已经持有互斥体的实例说上话。
@@ -137,6 +136,20 @@ void EnsureInstalled(const HWND hwnd) {
 	SetTimer(hwnd, kTimerRetryStartup, kRetryStartupMs, nullptr);
 }
 
+// 把 ini 里的设置应用到运行状态。启动时读一次；设置界面（另一个进程）改完会发
+// WM_RELOAD_SETTINGS 过来，再走一遍这里。
+void ApplySettingsFromIni() {
+	bool repaired = false;
+	const AppSettings settings = ReadSettings(&repaired);
+	if (repaired) {
+		Log(L"设置文件缺失或写坏了，已用默认值覆盖：%s", SettingsPath());
+	}
+	g_enabled = settings.mappingEnabled;
+	g_altPassThrough = settings.altCapsLockPassThrough;
+	ApplyCursorTintSettings(settings.cursorTintEnabled, settings.cursorTintPercent);
+	UpdateTrayTooltip();  // 映射开关变了，悬停提示要跟上
+}
+
 // 每分钟跑一次。Windows 会不声不响地摘掉超时的低级钩子，外壳会在 Explorer
 // 重启时丢掉托盘图标，所以这里把两者都重新挂一遍。配合快速重试和
 // TaskbarCreated 处理，本程序和外壳不管谁先起来都能兜住。
@@ -186,6 +199,11 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		InitializeCursorTint();
 		break;
 
+	case WM_RELOAD_SETTINGS:
+		// 设置界面改完 ini 发过来的，重读一遍立刻生效。
+		ApplySettingsFromIni();
+		break;
+
 	case WM_TIMER:
 		if (wParam == kTimerRetryStartup) {
 			EnsureInstalled(hwnd);
@@ -232,7 +250,7 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 	case WM_TRAYICON:
 		// 双击直接开设置页，右键出菜单（菜单里也有"设置..."）。
 		if (lParam == WM_LBUTTONDBLCLK) {
-			OpenSettingsWindow();
+			OpenSettingsApp();
 		} else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
 			ShowTrayMenu(hwnd);
 		}
@@ -244,7 +262,6 @@ LRESULT CALLBACK WndProc(const HWND hwnd, const UINT message, const WPARAM wPara
 		KillTimer(hwnd, kTimerRefreshStartup);
 		// 还原系统光标要趁早：后面的清理就算出了岔子，也不能让它拦住这一步。
 		DestroyCursorTint();
-		DestroySettingsWindow();
 		DestroySplashWindow();
 		DestroyBannerWindow();
 		UninstallHook();
@@ -308,7 +325,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	BuildPaths();
-	LoadSettings();  // exe 旁边的 ini；文件缺失或写坏时在这里用默认值覆盖
+	ApplySettingsFromIni();  // exe 旁边的 ini；缺失或写坏时在这里用默认值覆盖
 
 	// 要在任何窗口或屏幕 DC 出现之前调用，这样启动画面和由 DPI 算出的
 	// 尺寸都工作在真实的屏幕像素上。
@@ -330,7 +347,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		// 请求已经在运行的那个实例把托盘图标挂回去：Explorer 重启之后
 		// 它很可能就看不见了，而这正是用户以为程序死了、
 		// 又去点快捷方式的时候。
-		const HWND existing = FindWindowW(kWindowClass, kAppTitle);
+		const HWND existing = FindWindowW(kMainWindowClass, kAppTitle);
 		if (existing != nullptr && g_showYourselfMessage != 0) {
 			PostMessageW(existing, g_showYourselfMessage, 0, 0);
 		}
@@ -343,7 +360,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wcex.cbSize = sizeof(WNDCLASSEX);
 	wcex.lpfnWndProc = WndProc;
 	wcex.hInstance = hInstance;
-	wcex.lpszClassName = kWindowClass;
+	wcex.lpszClassName = kMainWindowClass;
 
 	if (!RegisterClassEx(&wcex)) {
 		const DWORD lastError = GetLastError();
@@ -363,7 +380,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// 因为那个线程可能已经在读它了。
 	const HWND mainWindow = CreateWindowEx(
 		0,
-		kWindowClass,
+		kMainWindowClass,
 		kAppTitle,
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT, 0, CW_USEDEFAULT, 0,
@@ -399,9 +416,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			const DWORD lastError = GetLastError();
 			LogMessageLoopFailure(lastError);
 			break;
-		}
-		if (HandleSettingsMessage(&msg)) {
-			continue;  // 设置页的 Tab/Esc 由 IsDialogMessage 处理
 		}
 		TranslateMessage(&msg);
 		DispatchMessageW(&msg);

@@ -10,3 +10,5 @@ void RefreshTrayIcon(HWND hwnd);
 void RemoveTrayIcon();
 void ShowBalloon(const wchar_t* text);
 void ShowTrayMenu(HWND hwnd);
+void UpdateTrayTooltip();  // 映射开关变了之后刷新悬停提示
+void OpenSettingsApp();    // 拉起同目录的 WinUI3 设置界面

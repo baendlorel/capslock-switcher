@@ -3,7 +3,6 @@
 #include "app.h"
 #include "logging.h"
 #include "resource.h"
-#include "settings.h"
 #include "version.h"
 
 #include <cstdio>
@@ -60,8 +59,9 @@ void FillTrayData(const HWND hwnd) {
 	wcscpy_s(g_nid.szTip, g_enabled ? kTooltipOn : kTooltipOff);
 }
 
-// 让悬停提示跟着开关走，不打开菜单也能看出状态。
-// 图标每次（重新）挂上时也会用到。
+}  // 匿名命名空间
+
+// 让悬停提示跟着映射开关走：主程序重载 ini 之后也要调它。
 void UpdateTrayTooltip() {
 	if (!g_trayIconAdded) {
 		return;
@@ -70,8 +70,6 @@ void UpdateTrayTooltip() {
 	wcscpy_s(g_nid.szTip, g_enabled ? kTooltipOn : kTooltipOff);
 	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
-
-}  // 匿名命名空间
 
 bool AddTrayIcon(const HWND hwnd) {
 	if (g_trayIconAdded) {
@@ -111,16 +109,24 @@ void ShowBalloon(const wchar_t* text) {
 	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
-// 开关只改状态和落盘，不弹气泡：设置页里点一下不该再冒出提示。
-void SetMappingEnabled(const bool enabled) {
-	g_enabled = enabled;
-	UpdateTrayTooltip();
-	SaveSettings();
-}
-
-void SetAltCapsLockEnabled(const bool enabled) {
-	g_altPassThrough = enabled;
-	SaveSettings();
+// 设置界面是另一个进程（WinUI3）。已经在跑的话它自己会跳到前台，所以这里只管拉起来。
+void OpenSettingsApp() {
+	wchar_t path[MAX_PATH] = {};
+	const DWORD length = GetModuleFileNameW(nullptr, path, _countof(path));
+	if (length == 0 || length + 40 >= _countof(path)) {
+		return;
+	}
+	wchar_t* slash = wcsrchr(path, L'\\');
+	if (slash == nullptr) {
+		return;
+	}
+	*(slash + 1) = L'\0';
+	wcscat_s(path, L"capslock-switcher-settings.exe");
+	const HINSTANCE launched =
+	    ShellExecuteW(nullptr, L"open", path, nullptr, nullptr, SW_SHOWNORMAL);
+	if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+		Log(L"设置界面启动失败（%lu）：%s", GetLastError(), path);
+	}
 }
 
 // 右键菜单：开关都在设置页里，这里只留版本号、打开设置和退出。
@@ -156,7 +162,7 @@ void ShowTrayMenu(const HWND hwnd) {
 	DestroyMenu(hMenu);
 
 	if (cmd == kMenuIdSettings) {
-		OpenSettingsWindow();
+		OpenSettingsApp();
 	} else if (cmd == kMenuIdExit) {
 		PostMessageW(hwnd, WM_CLOSE, 0, 0);
 	}
